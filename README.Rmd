@@ -1,0 +1,1206 @@
+---
+title: "Sexual cell fate reprogramming in the ovary by DMRT1"
+author: "Robin E. Lindeman, Micah D. Gearhart, Anna Minkina, Anthony D. Krentz, Vivian J. Bardwell, and David Zarkower"
+date: "10/24/2014"
+abstract: This document contains an annotated workflow of the informatics analyses including software settings and options, diagnostic plots of data quality and methods for statistical tests that can be reproduced in the R programming language.  The source code is available at https://github.com/micahgearhart/umn-gcd-bioinformatics-cag.
+
+output:
+  pdf_document: 
+    toc: true
+    fig_caption: true
+    number_sections: true
+    
+  html_document:
+    keep_md: yes
+---
+
+
+#Libraries
+## Load Software from bioconductor.org
+
+The following section loads software that has been previously downloaded from the Bioconductor repository.  For more information, please see http://bioconductor.org/install/.
+
+```{r libraries, results='hide', message=FALSE, warning=FALSE}
+#Graphics
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+library(biovizBase)
+library(ggbio)
+library(rtracklayer)
+
+#RNA-Seq Toolkit
+library(biomaRt)
+library(BiocParallel)
+library(DESeq2)
+library(GenomicFeatures)
+library(GenomicAlignments)
+library(org.Mm.eg.db)
+library(Rsamtools)
+
+#Single Cell
+library(monocle)
+
+#For Published Microarray
+library(Biobase)
+library(GEOquery)
+library(limma)
+library(NMF)
+
+#options
+options(scipen = 10, digits = 4)
+```
+
+# WT vs CAG-DMRT1 Ovary RNA-Seq
+## Load mm9 data from 2012 Ensembl Archive
+Use Biomart to create a TranscriptDB object based on the 2012/mm9 annotation.
+```{r biomaRt, eval=F}
+ensembl = useMart(host = "may2012.archive.ensembl.org", biomart = "ENSEMBL_MART_ENSEMBL", 
+    dataset = "mmusculus_gene_ensembl")
+mme <- makeTranscriptDbFromBiomart(host = "may2012.archive.ensembl.org", 
+    biomart = "ENSEMBL_MART_ENSEMBL", dataset = "mmusculus_gene_ensembl")
+seqlevelsStyle(mme)<-"UCSC"
+exonsByGene <- exonsBy(mme, by = "gene")
+exonsByGene <- keepSeqlevels(exonsByGene, seqlevels(exonsByGene)[1:22])
+genes<-genes(mme)
+genes<-keepSeqlevels(genes,seqlevels(genes)[1:22])
+save(genes,exonsByGene,file="exonsByGene_mm9_biomart_ensembl.rdata")
+```
+
+## Map spliced reads with STAR at the Minnesota Supercompting Institute
+The following bash script was run to convert fastq files to mapped reads.
+
+```{r mapRNASeq, eval=F}
+dd=/home/bardwell/data_release/umgc/hiseq/121019_SN261_0458_BD1GULACXX/Project_Zarkower_Project_006
+wd=/home/bardwell/gearhart/dmrt1/ctv/
+org=mm9
+
+for i in DMEf8_TGACCA WTf6_CGATGT WTm1_ATTCCT DMEf9_ACAGTG WTf7_TTAGGC WTm2_ATCACG
+
+#i="${file%.*}"
+
+do
+
+sf1="${i}_L008_R1_001.fastq"
+sf2="${i}_L008_R2_001.fastq"
+
+cat << EOF > $i.star.pbs
+#PBS -l mem=32000mb,nodes=1:ppn=4,walltime=10:00:00 
+#PBS -m a
+#PBS -M gearh006@umn.edu 
+#PBS -q lab 
+mkdir $wd/$i
+cd $wd/$i
+/home/bardwell/shared/STAR_2.3.0e/STAR --genomeDir /home/bardwell/shared/STAR_GENOME/$org/ \
+--runThreadN 8 --readFilesIn $dd/$sf1 $dd/$sf2
+
+qsub $wd/$i.igv.pbs
+
+EOF
+
+cat << EOF > $i.igv.pbs
+#PBS -l mem=8000mb,nodes=1:ppn=1,walltime=08:00:00 
+#PBS -m a
+#PBS -M gearh006@umn.edu 
+#PBS -q lab 
+module load samtools
+
+cd $wd/$i
+#convert sam to bam
+samtools view -bS -o $i.raw.bam Aligned.out.sam 
+
+#sort the bam file
+samtools sort $i.raw.bam $i.sort
+
+#remove duplicates
+java -Xmx2g -jar /home/bardwell/shared/picard-tools-1.94/MarkDuplicates.jar INPUT=$i.sort.bam \
+OUTPUT=$i.bam REMOVE_DUPLICATES=true ASSUME_SORTED=true METRICS_FILE=$i.metrics \
+MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000 VALIDATION_STRINGENCY=LENIENT 
+
+#create the index file
+samtools index $i.bam
+
+#igvtools to make a TDF File
+java -Xmx2g  -jar /home/bardwell/shared/IGVTools_2/igvtools.jar count \
+-z 5 -w 25 -e 100 $i.bam $i.tdf /home/bardwell/shared/IGVTools_2/genomes/$org.genome
+
+rm $i.sort.bam
+rm $i.raw.bam
+
+mv $i.bam $wd/
+mv $i.bam.bai $wd/
+mv $i.tdf $wd/
+EOF
+
+qsub $i.star.pbs
+
+done
+```
+
+## Identify Upregulated Genes in Whole Gonad RNA-Seq Data
+This section counts the reads in genes defined by the ENSEMBL 2012 Transcript DB and loads the data into a Summarized Experiment.
+
+```{r CountRNASeq, eval=FALSE}
+load("exonsByGene_mm9_biomart_ensembl.rdata")
+(fls <- list.files("mm9", pattern=glob2rx("*_*.bam"),full=TRUE))
+bamlst <- BamFileList(fls,yieldSize=1000000)
+BiocParallel::register(MulticoreParam(workers=4))
+cag_dmrt1 <- GenomicAlignments::summarizeOverlaps(exonsByGene, bamlst, 
+                                                  mode="Union",singleEnd=FALSE, 
+                                                  ignore.strand=TRUE)
+save(cag_dmrt1,file="cag_dmrt1.rdata")
+```
+
+###Load summarized experiment and annotate the samples.
+```{r load_bulk_rnaseq_data}
+load("cag_dmrt1.rdata")
+load("exonsByGene_mm9_biomart_ensembl.rdata")
+colData(cag_dmrt1)@rownames 
+colData(cag_dmrt1)@rownames <- sapply(strsplit(colData(cag_dmrt1)@rownames,"_"),"[[",1)
+colData(cag_dmrt1)$sex<-as.factor(c("Female","Female","Female","Female","Male","Male"))
+colData(cag_dmrt1)$dmrt1<-as.factor(c("on","on","off","off","on","on"))
+colData(cag_dmrt1)
+levels(colData(cag_dmrt1)$sex)
+levels(colData(cag_dmrt1)$dmrt1)
+```
+
+### DESeq2
+Use DESeq2 to identify differentially expressed genes between wild type and mutant ovaries.
+
+```{r ovary_contrast}
+#Subset the Summarized Experiment to only include the Female Data
+colData(cag_dmrt1)
+cag_dmrt1F<-cag_dmrt1[,cag_dmrt1$sex %in% "Female" & cag_dmrt1$dmrt1 %in% c("off","on")]
+colData(cag_dmrt1F)
+cag_dmrt1F$sex<-droplevels(cag_dmrt1F$sex)
+levels(colData(cag_dmrt1F)$sex)
+levels(colData(cag_dmrt1F)$dmrt1)
+
+#Run DESeq2
+cag_dmrt1F_dds <- DESeqDataSet(cag_dmrt1F, design = ~1   )
+cag_dmrt1F_dds <- estimateSizeFactors(cag_dmrt1F_dds )
+sizeFactors(cag_dmrt1F_dds)
+colSums(counts(cag_dmrt1F_dds))
+design(cag_dmrt1F_dds) <- ~dmrt1
+cag_dmrt1F_dds <- DESeq( cag_dmrt1F_dds )
+cag_dmrt1F_res <- results( cag_dmrt1F_dds )
+
+#head(cag_dmrt1F_res)
+#plotDispEsts(cag_dmrt1F_dds)
+#DESeq2::plotMA(cag_dmrt1F_dds)
+hist(cag_dmrt1F_res$pvalue, breaks=40, col="grey",main="Ovary P-value Distribution")
+
+#use full results names for writing out table below
+resNames<-mcols(cag_dmrt1F_res)$description
+names(resNames)<-colnames(cag_dmrt1F_res)
+
+#Convert Results to DataFrame
+cag_dmrt1F_DF <-as.data.frame(cag_dmrt1F_res[!is.na(cag_dmrt1F_res$stat),])
+blah<-select(org.Mm.eg.db,keys=rownames(cag_dmrt1F_DF),keytype="ENSEMBL",
+             column=c("SYMBOL","ENTREZID"))
+cag_dmrt1F_DF$symbol<-blah[match(rownames(cag_dmrt1F_DF),blah$ENSEMBL),"SYMBOL"]
+cag_dmrt1F_DF$ENTREZID<-blah[match(rownames(cag_dmrt1F_DF),blah$ENSEMBL),"ENTREZID"]
+
+#Add Chromosomal Location to table
+temp<-as.data.frame(seqnames(exonsByGene))
+temp<-temp[!duplicated(temp$group_name),]
+idx<-match(rownames(cag_dmrt1F_DF),temp$group_name)
+cag_dmrt1F_DF$CHR<-temp[idx,"value"]
+
+#order
+cag_dmrt1F_DF<-cag_dmrt1F_DF[with(cag_dmrt1F_DF,order(-log2FoldChange)),]
+
+#Sanity Check
+temp<-c("Sox9","Foxl2","Dmrt1","Pou5f1","Gapdh","Hsd17b3","Insl3","Cyp19a1")
+cag_dmrt1F_DF[cag_dmrt1F_DF$symbol %in% temp,]
+
+#Subset DataFrame with Significantly Enriched Dmrt1 Genes
+cag_dmrt1F_DF_subset<-cag_dmrt1F_DF[which(cag_dmrt1F_DF$padj < 0.05 &
+                                            abs(cag_dmrt1F_DF$log2FoldChange) > 2),]
+nrow(subset(cag_dmrt1F_DF_subset,log2FoldChange >2))
+nrow(subset(cag_dmrt1F_DF_subset,log2FoldChange <2))
+```
+
+# Analysis of X Chromosome Enrichment
+Many of the highly differentially expressed genes were on the X chromosome.  Use statistical test to determine if either the number or magnitude of these changes were statistically significant.  To determine if there are more genes than expected, this section performs a hypergeometric test.
+
+## Hypergeometric Tests
+```{r HypergeometricTest}
+total_balls<-table(cag_dmrt1F_DF$CHR)
+drawn_balls<-table(cag_dmrt1F_DF_subset$CHR)
+chrdata<-as.data.frame(rbind(total_balls,drawn_balls,pval=0))
+
+calcHyper<-function (chrome) {
+  (q<-chrdata["drawn_balls",chrome]) #number of white balls drawn from urn
+  (k<-sum(chrdata["drawn_balls",])) #total number of balls drawn from urn
+  (m<-chrdata["total_balls",chrome]) #number of white balls in the urn
+  (n<-sum(chrdata["total_balls",])-m) #number of black balls in the urn
+phyper(q,m,n,k,lower.tail = FALSE)
+}
+
+for (i in colnames(chrdata)) {chrdata["pval",i]<-calcHyper(i)}
+chrdata<-t(chrdata)
+chrdata[,"pval"]<-p.adjust(chrdata[,"pval"],"BH")
+chrdata
+#cag_dmrt1F_DF_subset[cag_dmrt1F_DF_subset$CHR=="chrX",]$symbol
+
+```
+
+## GSEA & Supplemental Table 1b
+To determine if the magnitude of these changes is significant, calculate the average LogFC for each chromosome using Gene Set Enrichment Analysis following the protocol described here:  http://bioconductor.org/help/course-materials/2013/BioC2013/DESeq2_parathyroid.pdf
+
+```{r GSEA}
+res2<-cag_dmrt1F_DF
+res2$ENSEMBL<-rownames(res2)
+incm <- do.call( rbind, with(res2, tapply(ENSEMBL, CHR, function(x) CHR == res2[x,"CHR"] ) ))
+colnames(incm) <- res2$ENSEMBL
+#str(incm)
+rowSums(incm)
+mean(colSums(incm)==1)
+
+testCategory <- function( chr ) {
+isMember <- incm[ chr, ]
+data.frame(
+chr = chr,
+numGenes = sum( isMember ),
+avgLFC = mean( res2$log2FoldChange[isMember] ),
+strength = sum( res2$log2FoldChange[isMember] ) / sqrt(sum(isMember)),
+pvalue = t.test( res2$log2FoldChange[ isMember ] )$p.value,
+CHR = chr) }
+
+
+gsea<-do.call( rbind, lapply( rownames(incm)[1:20], testCategory ) )
+#gsea$avgLFC<-gsea$avgLFC/mean(gsea$avgLFC)
+sum(gsea$numGenes)
+gsea$padj<-p.adjust(gsea$pvalue,"BH")
+gsea<-gsea[,c("chr","numGenes","avgLFC","strength","pvalue","padj")]
+colnames(gsea)<-c("chr","gsea_numGenes","gsea_avgLFC","gsea_strength","gsea_pvalue","gsea_padj")
+chrdata<-merge(chrdata,gsea,by.x=0,by.y="chr")
+rownames(chrdata)<-chrdata[,1]
+chrdata<-chrdata[,c("total_balls","drawn_balls","pval","gsea_avgLFC",
+                    "gsea_strength","gsea_pvalue","gsea_padj")]
+colnames(chrdata)<-c("genes_on_chr","enriched_genes_on_chr","hypergeometeric_padj",
+                     "gsea_avgLFC","gsea_strength","gsea_pvalue","gsea_padj")
+(chrdata<-chrdata[paste0("chr",c(1:19,"X")),])
+
+#Center the avglogFC values
+chrdata$gsea_avgLFC<-chrdata$gsea_avgLFC-mean(chrdata$gsea_avgLFC)
+
+write.csv(chrdata,file="Supplemental_Table_1b.csv",quote=F)
+```
+<div class="pagebreak"></div>
+## Vizualize ChrX Enrichment - Figure S2
+Create figures for the Chromosome X data to be included in the supplement.
+
+### Supplemental Figure S2A - Ideogram
+```{r Ideogram,message=FALSE, warning=FALSE}
+# Subset genes that are list
+log5_enriched<-subset(cag_dmrt1F_DF,abs(log2FoldChange)>5)
+
+#download mm9 Ideogram
+#mm9IdeogramCyto <- getIdeogram("mm9", cytoband = TRUE)
+#save(mm9IdeogramCyto,file="mm9IdeogramCyto.rdata")
+load("mm9IdeogramCyto.rdata")
+seqlevelsStyle(mm9IdeogramCyto)
+seqlevels(mm9IdeogramCyto)
+seqlengths(mm9IdeogramCyto)
+mm9IdeogramCyto<-keepSeqlevels(mm9IdeogramCyto,paste0("chr",c(1:19,"X")))
+
+
+
+#Create a GRanges object
+log5_genes<-genes[rownames(log5_enriched)]
+log5_genes<-keepSeqlevels(log5_genes,paste0("chr",c(1:19,"X")))
+seqlengths(log5_genes)<-seqlengths(mm9IdeogramCyto)
+log5_genes$lfc<-log5_enriched$log2FoldChange
+
+p <- ggplot(mm9IdeogramCyto) + layout_karyogram(cytoband = FALSE)  +theme_bw()
+p <- p + layout_karyogram(log5_genes, geom = "rect", ylim = c(11, 21), color = "red")
+p
+```
+<div class="pagebreak"></div>
+
+### Supplemental Figure S2B - PieChart
+
+```{r PieChart,warning=FALSE,fig.height=8}
+#pie chart
+(num_onX<-nrow(subset(log5_enriched,CHR=="chrX")))
+(total<-nrow(log5_enriched))
+num_onX/total
+
+temp<-as.data.frame(table(log5_enriched[,"CHR"]))
+temp<-temp[temp$Var1 %in% paste0("chr",c(1:19,"X")), ]
+colnames(temp)<-c("Chromosome","Number_of_Enriched_Genes")
+
+pie <- ggplot(temp,aes(x="", y=Number_of_Enriched_Genes, fill = Chromosome )) +
+       geom_bar(width = 1,stat="identity",colour="black") + coord_polar(theta="y") +
+       geom_text(aes(x=1.7,y = 122, label = "chrX")) +  theme_bw()
+pie
+```
+<div class="pagebreak"></div>
+
+### Supplemental Figure S2C - GSEA
+```{r plotGSEA,warning=FALSE}
+#Plot AvgLFC across chromosomes
+temp<-data.frame(avgLFC=chrdata$gsea_avgLFC,chromosome=rev(rownames(chrdata)))
+levels(temp$chromosome)<-rev(rownames(chrdata))
+temp<-melt(temp,value.name="avgLFC")
+#plot gsea_avgLFC
+q<-ggplot(temp,aes(x=chromosome,y=avgLFC)) +geom_bar(stat = "identity") + theme_bw() +
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+   coord_flip()
+q 
+```
+<div class="pagebreak"></div>
+
+## Create a heatmap to visualize extent of transdifferentiation -- Figure 3A
+Plot FPKM values for wild type and mutant ovary next to expression values for testis.   Rather than create clusters, sort the genes from female enriched (top) to male enriched(bottom) and vizualize mutant ovaries in between.
+```{r heatmap}
+#Normalize the Entire Dataset
+cag_dds <- DESeqDataSet(cag_dmrt1, design = ~1   )
+cag_dds <- estimateSizeFactors(cag_dds )
+sizeFactors(cag_dds)
+colSums(counts(cag_dds))
+
+#extract fpkm values
+rd<-as.data.frame(fpkm(cag_dds))
+
+#subset for differentially expressed genes
+rd<-rd[rownames(rd) %in% rownames(cag_dmrt1F_DF_subset),]
+rd<-rd[,c(3,4,1,2,5,6)]
+
+#rd4<-rd3
+#Order data from Female to Male
+rd$sex_ratio <- (rd[,5]+rd[,6])/(rd[,1]+rd[,2])
+rd<-rd[with(rd,order(sex_ratio)),1:6]
+
+#create a factor label for gender
+labels<-as.factor(c("Female","Female","Female","Female","Male","Male"))
+labels<-relevel(labels, "Male")
+aheatmap(log2(rd+0.25),Rowv=NA,Colv=NA,color="PRGn",scale="row", annCol=labels)
+```
+
+<div class="pagebreak"></div>
+# WT Ovary vs Testis RNA-Seq
+
+## Use wt RNA-SEQ to Identify Male and Female Specific Genes
+Count reads for the wild type samples.
+
+```{r Count_WT, eval=FALSE}
+load("../dmrt6/exonsByGene_mm9_biomart_ensembl.rdata")
+(fls <- list.files("mm9", pattern=glob2rx("WTm*.bam"),full=TRUE))
+(fls2 <- list.files("mm9", pattern=glob2rx("WTf*.bam"),full=TRUE))
+fls<-c(fls,fls2)
+bamlst <- BamFileList(fls,yieldSize=1000000)
+BiocParallel::register(MulticoreParam(workers=4))
+WT<- summarizeOverlaps(exonsByGene, bamlst, mode="Union",singleEnd=FALSE, ignore.strand=TRUE)
+save(WT,file="wt_testis_ovary_data.rdata")
+```
+
+
+Determine logFC between male and female gonads to identify sex specific transcripts.
+``` {r WT_DESeq2}
+load("wt_testis_ovary_data.rdata")
+colData(WT)
+colData(WT)@rownames
+colData(WT)@rownames<-c("WTm1","WTm2","WTf6","WTf7")
+colData(WT)$sex<-as.factor(c(rep("Male",2),rep("Female",2)))
+WT_dds <- DESeqDataSet(WT, design = ~1   )
+WT_dds <- estimateSizeFactors(WT_dds )
+sizeFactors(WT_dds)
+colSums(counts(WT_dds))
+design(WT_dds) <- ~sex
+WT_dds <- DESeq( WT_dds )
+WT_res <- results( WT_dds )
+resultsNames(WT_dds)
+head(WT_res)
+#plotDispEsts(WT_dds)
+#DESeq2::plotMA(WT_res)
+hist(WT_res$pvalue, breaks=40, col="grey")
+
+blah<-select(org.Mm.eg.db,keys=rownames(WT),keytype="ENSEMBL",column="SYMBOL")
+WT_res$symbol<-blah[match(rownames(WT_res),blah$ENSEMBL),"SYMBOL"]
+WT_res[grep("Foxl2",WT_res$symbol),]
+WT_res[grep("Sox9",WT_res$symbol),]
+WT_res[grep("Cyp19a1",WT_res$symbol),]
+WT_resDF<-as.data.frame(WT_res)
+#remove NAs
+WT_resDF<-WT_resDF[!is.na(WT_resDF$padj),]
+maleSig<-rownames(WT_resDF[WT_resDF$log2FoldChange>2,])
+femaleSig<-rownames(WT_resDF[-1*WT_resDF$log2FoldChange>2,])
+length(maleSig)
+length(femaleSig)
+```
+
+
+## Supplemental Table 1a
+Combine the "Ovary vs CAG Ovary"" and "Ovary vs Testis" datasets to answer questions about the extent of transformation and create a "super table" of all the important information.
+
+```{r Supertable}
+#first calculate percent of male specific genes 
+sum(rownames(subset(cag_dmrt1F_DF_subset,log2FoldChange<0)) %in% femaleSig) / length(femaleSig)
+
+#first calculate percent of male specific genes 
+sum(rownames(subset(cag_dmrt1F_DF_subset,log2FoldChange>0)) %in% maleSig) / length(maleSig)
+
+#merge WT logFC into "Supertable"
+#head(cag_dmrt1F_DF_subset)
+supertable<-cag_dmrt1F_DF_subset
+idx<-match(rownames(supertable),rownames(WT_resDF))
+supertable$"log2 fold change: Testis vs Ovary"<-WT_resDF[idx,"log2FoldChange"]
+supertable$"BH adjusted p-Value: Testis vs Ovary"<-WT_resDF[idx,"padj"]
+idx<-match(colnames(supertable),names(resNames))
+idx<-idx[!is.na(idx)]
+colnames(supertable)[idx]<-resNames
+#head(supertable)
+write.csv(supertable,file="Supplementary_Table_1a.csv",quote=F)
+```
+
+# Compare DMRT1 Overexpression to FOXL2 KO Microarrays 
+
+##Download published micrarray data from NCBI (GSE16853)
+
+```{r GSE16853,eval=FALSE}
+# From GEO2R
+gset <- getGEO("GSE16853", GSEMatrix =TRUE,destdir=".")
+if (length(gset) > 1) idx <- grep("GPL6246", attr(gset, "names")) else idx <- 1
+gset <- gset[[idx]]
+
+# make proper column names to match toptable 
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+
+# group names for all samples
+sml <- c("X","X","X","G0","G0","G1","G1","G1");
+
+# eliminate samples marked as "X"
+sel <- which(sml != "X")
+sml <- sml[sel]
+gset <- gset[ ,sel]
+
+# log2 transform
+ex <- exprs(gset)
+qx <- as.numeric(quantile(ex, c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm=T))
+LogC <- (qx[5] > 100) ||
+          (qx[6]-qx[1] > 50 && qx[2] > 0) ||
+          (qx[2] > 0 && qx[2] < 1 && qx[4] > 1 && qx[4] < 2)
+if (LogC) { ex[which(ex <= 0)] <- NaN
+  exprs(gset) <- log2(ex) }
+
+# set up the data and proceed with analysis
+fl <- as.factor(sml)
+gset$description <- fl
+design <- model.matrix(~ description + 0, gset)
+colnames(design) <- levels(fl)
+fit <- lmFit(gset, design)
+cont.matrix <- makeContrasts(G1-G0, levels=design)
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit2 <- eBayes(fit2, 0.01)
+tT <- topTable(fit2, adjust="fdr", sort.by="B", number=Inf)
+head(tT[tT$adj.P.Val<0.05 & abs(tT$logFC) > 2,])
+
+# load NCBI platform annotation
+gpl <- annotation(gset)
+platf <- getGEO(gpl, AnnotGPL=TRUE,destdir=".")
+ncbifd <- data.frame(attr(dataTable(platf), "table"))
+
+# replace original platform annotation
+tT <- tT[setdiff(colnames(tT), setdiff(fvarLabels(gset), "ID"))]
+tT <- merge(tT, ncbifd, by="ID")
+tT <- tT[order(tT$P.Value), ]  # restore correct order
+colnames(tT)
+tT_foxl2_KO <- subset(tT, select=c("ID","adj.P.Val","P.Value","t","B","logFC","Gene.symbol","Gene.ID"))
+
+#take minimum adj.P.Val
+tT_foxl2_KO<-tT_foxl2_KO[with(tT_foxl2_KO,order(adj.P.Val)),]
+tT_foxl2_KO<-tT_foxl2_KO[!duplicated(tT_foxl2_KO$Gene.ID),]
+
+# Gene.ID's differentially expressed in Microarray Dataset
+#tT2<-tT2[tT2$adj.P.Val < 0.05,]
+nrow(tT_foxl2_KO)
+head(tT_foxl2_KO)
+
+save(tT_foxl2_KO,file="foxl2_ko_DEGs.rdata")
+```
+
+
+## Compare DMRT1 Overexpression to FOXL2 Knockout
+```{r combineDMRT1_FOXL2}
+load("foxl2_ko_DEGs.rdata")
+#Use NCBI GeneIDs to match Microarray Data to RNA-Seq
+idx<-match(tT_foxl2_KO$Gene.ID,cag_dmrt1F_DF$ENTREZID)
+tT_foxl2_KO$cag_dmrt1F_logFC<-cag_dmrt1F_DF[idx,"log2FoldChange"]
+tT_foxl2_KO$cag_dmrt1F_padj<-cag_dmrt1F_DF[idx,"padj"]
+tT_foxl2_KO$chr<-cag_dmrt1F_DF[idx,"CHR"]
+tT_foxl2_KO$ENSEMBL<-rownames(cag_dmrt1F_DF[idx,])
+
+#Check for NAs
+mean(is.na(tT_foxl2_KO$cag_dmrt1F_logFC))
+
+#Filter out NAs
+tT3<-tT_foxl2_KO[!is.na(tT_foxl2_KO$cag_dmrt1F_logFC),]
+nrow(tT3)
+
+
+#Sanity Check
+temp<-c("Wnt4","Etd","Hsd17b3","Insl3","Cyp19a1")
+tT3[tT3$Gene.symbol %in% temp,]
+
+#Filter out genes not differentially expressed in either sample
+nrow(tT3<-subset(tT3,adj.P.Val<0.05 | cag_dmrt1F_padj < 0.05))
+
+#Use the following code to identify outliers
+#plot(tT3$logFC,tT3$cag_dmrt1F_logFC,pch=13,cex=0.2,
+#     xlim=c(-11,11),ylim=c(-11,11),
+#     xlab="FOXL2 KO logFC",ylab="DMRT1 OE logFC",
+#     main="FOXL2 vs DMRT1 in the Ovary")
+#identify(tT3$logFC,tT3$cag_dmrt1F_logFC,labels=tT3$Gene.symbol)
+
+#Add a color code for whether a gene is Male Enriched or Female Enriched
+tT3$enrich<-"none"
+tT3[tT3$ENSEMBL %in% maleSig,"enrich"]<-"Male Enriched"
+tT3[tT3$ENSEMBL %in% femaleSig,"enrich"]<-"Female Enriched"
+tT3$chrX<-tT3$chr=="chrX"
+```
+
+## Figure 3B Scatterplot
+Plot the DMRT1 overexpression data vs the FOXL2 knockout data with color coding for sex-specific gene expression.
+
+```{r Scatterplot}
+scattertT3 <- function (genes) {
+p<-ggplot(tT3,aes(x=tT3$logFC,y=tT3$cag_dmrt1F_logFC,color=enrich,shape=chrX))
+p<- p +  geom_point(size=ifelse(tT3$chrX,4,2)) +
+  scale_colour_manual(values=c("red", "blue","gray")) +
+  annotate("rect",xmin=-1, xmax=1, ymin=4, ymax=Inf, fill="blue",alpha=0.25) +
+  annotate("rect",xmin=-1, xmax=1, ymin=-4, ymax=-Inf, fill="pink",alpha=0.25) +
+  #horizontal boxes
+  #annotate("rect",xmin=1, xmax=Inf, ymin=-1, ymax=1, fill="gray",alpha=0.25) +
+  #annotate("rect",xmin=-Inf, xmax=-1, ymin=-1, ymax=1, fill="gray",alpha=0.25) +
+  ylim(-10,10) + xlim(-6,6) +
+  xlab("FOXL2 KO logFC") + ylab("DMRT1 OE logFC") +
+  ggtitle("FOXL2 vs DMRT1 in the Ovary") +
+  guides(color=FALSE,shape=FALSE) +
+  theme_bw() 
+
+for (gene in genes) {
+   gene <- paste0("^", gene, "$")
+line <- grep(gene,tT3$Gene.symbol)
+p <- p+annotate("text",x=tT3$logFC[line], y=tT3$cag_dmrt1F_logFC[line],label=tT3$Gene.symbol[line])
+}
+p
+
+}
+
+scattertT3(c("Dmrt1","Foxl2","Etd","Dhh","Sncb","Cyp19a1",
+             "Esr2","Wnt4","Ptgfr","Adcyap1","Defb36","Cst9","Hsd17b3"))
+```
+
+
+# Single Cell Analysis
+
+The single cell Nextera libraries were first sequenced on a paired end MiSeq run.  Once we knew that the experiment worked, we went and sequenced the same library at a greater depth on the HiSeq 2000 as a single end 50 bp read.  We mapped each run separately and did comparative data exploration before the count tables were combined for the downstream analysis.
+
+##Map MiSeq Reads
+```{r mapMiSeq,eval=FALSE}
+dd=/home/zarkowe0/data_release/umgc/miseq/140710_M00784_0131_000000000-AA30P_Analysis/
+wd=/home/bardwell/gearhart/dmrt1/ctv/single
+org=mm9
+
+
+for i in cDNA-002-C12_S47 cDNA-002-C13_S53 cDNA-002-C16_S5 cDNA-002-C17_S64 cDNA-002-C18_S22 cDNA-002-C19_S6 cDNA-002-C1_S4 cDNA-002-C20_S60 cDNA-002-C21_S48 cDNA-002-C22_S58 cDNA-002-C23_S59 cDNA-002-C24_S9 cDNA-002-C26_S21 cDNA-002-C27_S66 cDNA-002-C28_S19 cDNA-002-C2_S24 cDNA-002-C31_S34 cDNA-002-C32_S35 cDNA-002-C33_S28 cDNA-002-C34_S15 cDNA-002-C36_S16 cDNA-002-C37_S30 cDNA-002-C38_S1 cDNA-002-C3_S25 cDNA-002-C41_S33 cDNA-002-C42_S10 cDNA-002-C43_S57 cDNA-002-C44_S56 cDNA-002-C46_S39 cDNA-002-C47_S61 cDNA-002-C49_S54 cDNA-002-C50_S67 cDNA-002-C52_S18 cDNA-002-C53_S23 cDNA-002-C55_S52 cDNA-002-C56_S17 cDNA-002-C57_S55 cDNA-002-C58_S14 cDNA-002-C59_S26 cDNA-002-C5_S20 cDNA-002-C62_S36 cDNA-002-C63_S63 cDNA-002-C64_S29 cDNA-002-C65_S62 cDNA-002-C66_S38 cDNA-002-C67_S45 cDNA-002-C69_S2 cDNA-002-C71_S41 cDNA-002-C72_S46 cDNA-002-C73_S49 cDNA-002-C74_S68 cDNA-002-C75_S50 cDNA-002-C77_S37 cDNA-002-C78_S44 cDNA-002-C79_S43 cDNA-002-C7_S32 cDNA-002-C82_S3 cDNA-002-C84_S31 cDNA-002-C87_S40 cDNA-002-C89_S65 cDNA-002-C91_S27 cDNA-002-C92_S13 cDNA-002-C93_S11 cDNA-002-C94_S7 cDNA-002-C96_S51 cDNA-002-C9_S8 Zarkower-021-002-PCR-Bulk_S69
+
+#i="${file%.*}"
+
+do
+
+sf1="${i}_L001_R1_001.fastq"
+sf2="${i}_L001_R2_001.fastq"
+
+cat << EOF > $i.pbs
+#PBS -l mem=20gb,nodes=1:ppn=1,walltime=02:00:00 
+#PBS -m a
+#PBS -M gearh006@umn.edu 
+#PBS -q lab 
+
+module load samtools
+mkdir $wd/$i
+cd $wd/$i
+ 
+#NEXTERA Adapter removal
+java -Xmx16g -jar /home/bardwell/shared/Trimmomatic-0.32/trimmomatic-0.32.jar PE \
+-threads 1 -phred33 -trimlog log \
+$dd/$sf1  $dd/$sf2 \
+$i.R1_trimmed.fastq.gz $i.UR1_trimmed.fastq.gz \
+$i.R2_trimmed.fastq.gz $i.UR2_trimmed.fastq.gz \
+ILLUMINACLIP:../NexteraPE-PE.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:5 MINLEN:25 
+
+#run fastq after cutadapt
+gunzip $i.R1_trimmed.fastq.gz
+/home/bardwell/shared/FastQC/fastqc -o ../fastqc $i.R1_trimmed.fastq
+gunzip $i.R2_trimmed.fastq.gz
+/home/bardwell/shared/FastQC/fastqc -o ../fastqc $i.R2_trimmed.fastq
+
+#use STAR to map PE reads
+/home/bardwell/shared/STAR_2.3.0e/STAR  --genomeDir /home/bardwell/shared/STAR_GENOME/$org/ \
+  --runThreadN 1 --readFilesIn $i.R1_trimmed.fastq $i.R2_trimmed.fastq 
+
+#convert sam to bam
+samtools view -bS -o $i.raw.bam Aligned.out.sam 
+
+#sort the bam file
+samtools sort $i.raw.bam $i.sort
+
+#remove duplicates
+java -Xmx16g -jar /home/bardwell/shared/picard-tools-1.94/MarkDuplicates.jar \
+INPUT=$i.sort.bam OUTPUT=$i.bam REMOVE_DUPLICATES=true ASSUME_SORTED=true \
+METRICS_FILE=$i.metrics MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000 VALIDATION_STRINGENCY=LENIENT 
+
+#create the index file
+samtools index $i.bam
+
+#igvtools to make a TDF File
+java -Xmx16g  -jar /home/bardwell/shared/IGVTools_2/igvtools.jar count \
+-z 5 -w 25 -e 100 $i.bam $i.tdf /home/bardwell/shared/IGVTools_2/genomes/$org.genome
+
+rm $i.sort.bam
+rm $i.raw.bam
+
+mv $i.bam $wd/
+mv $i.bam.bai $wd/
+mv $i.tdf $wd/
+EOF
+
+qsub $i.pbs
+
+done
+```
+
+##Map HiSeq Reads
+```{r mapHiseq,eval=FALSE}
+dd=/home/zarkowe0/data_release/umgc/hiseq/140910_SN1073_0395_BC569FACXX/Project_Zarkower_Project_026
+wd=/scratch2/zarkowe0/
+#wd=/home/bardwell/gearhart/dmrt1/ctv/single_hiseq
+org=mm9
+
+
+for i in cDNA_002_C10_CGTACTAG-AGAGTAGA cDNA_002_C37_TCCTGAGC-ACTGCATA cDNA_002_C66_GGACTCCT-ACTGCATA cDNA_002_C11_TAGGCATG-CTCTCTAT  cDNA_002_C38_TAAGGCGA-TAGATCGC  cDNA_002_C67_TAGGCATG-GTAAGGAG cDNA_002_C12_TAGGCATG-AAGGAGTA  cDNA_002_C3_TCCTGAGC-TAGATCGC   cDNA_002_C69_TAAGGCGA-CTCTCTAT cDNA_002_C13_CTCTCTAC-GTAAGGAG  cDNA_002_C41_GGACTCCT-TAGATCGC  cDNA_002_C71_TAGGCATG-TAGATCGC cDNA_002_C16_TAAGGCGA-GTAAGGAG  cDNA_002_C42_CGTACTAG-CTCTCTAT  cDNA_002_C72_TAGGCATG-ACTGCATA cDNA_002_C17_CAGAGAGG-CTAAGCCT  cDNA_002_C43_CAGAGAGG-TAGATCGC  cDNA_002_C73_CTCTCTAC-TAGATCGC cDNA_002_C18_AGGCAGAA-ACTGCATA  cDNA_002_C44_CTCTCTAC-CTAAGCCT  cDNA_002_C74_GCTACGCT-AGAGTAGA cDNA_002_C19_TAAGGCGA-ACTGCATA  cDNA_002_C46_GGACTCCT-AAGGAGTA  cDNA_002_C75_CTCTCTAC-CTCTCTAT cDNA_002_C1_TAAGGCGA-AGAGTAGA   cDNA_002_C47_CAGAGAGG-GTAAGGAG  cDNA_002_C77_GGACTCCT-GTAAGGAG cDNA_002_C20_CAGAGAGG-AGAGTAGA  cDNA_002_C49_CTCTCTAC-ACTGCATA  cDNA_002_C78_TAGGCATG-AGAGTAGA cDNA_002_C21_TAGGCATG-CTAAGCCT  cDNA_002_C50_GCTACGCT-TATCCTCT  cDNA_002_C79_TAGGCATG-TATCCTCT cDNA_002_C22_CAGAGAGG-CTCTCTAT  cDNA_002_C52_AGGCAGAA-CTCTCTAT  cDNA_002_C7_TCCTGAGC-CTAAGCCT cDNA_002_C23_CAGAGAGG-TATCCTCT  cDNA_002_C53_AGGCAGAA-AAGGAGTA  cDNA_002_C82_TAAGGCGA-TATCCTCT cDNA_002_C24_CGTACTAG-TAGATCGC  cDNA_002_C55_CTCTCTAC-AGAGTAGA  cDNA_002_C84_TCCTGAGC-AAGGAGTA cDNA_002_C26_AGGCAGAA-GTAAGGAG  cDNA_002_C56_AGGCAGAA-TAGATCGC  cDNA_002_C87_GGACTCCT-CTAAGCCT cDNA_002_C27_GCTACGCT-CTCTCTAT  cDNA_002_C57_CTCTCTAC-AAGGAGTA  cDNA_002_C89_GCTACGCT-TAGATCGC cDNA_002_C28_AGGCAGAA-TATCCTCT  cDNA_002_C58_CGTACTAG-ACTGCATA  cDNA_002_C91_TCCTGAGC-TATCCTCT cDNA_002_C2_AGGCAGAA-CTAAGCCT   cDNA_002_C59_TCCTGAGC-CTCTCTAT  cDNA_002_C92_CGTACTAG-GTAAGGAG cDNA_002_C31_GGACTCCT-CTCTCTAT  cDNA_002_C5_AGGCAGAA-AGAGTAGA   cDNA_002_C93_CGTACTAG-TATCCTCT cDNA_002_C32_GGACTCCT-TATCCTCT  cDNA_002_C62_GGACTCCT-AGAGTAGA  cDNA_002_C94_TAAGGCGA-AAGGAGTA cDNA_002_C33_TCCTGAGC-AGAGTAGA  cDNA_002_C63_CAGAGAGG-AAGGAGTA  cDNA_002_C96_CTCTCTAC-TATCCTCT cDNA_002_C34_CGTACTAG-AAGGAGTA  cDNA_002_C64_TCCTGAGC-GTAAGGAG  cDNA_002_C9_TAAGGCGA-CTAAGCCT cDNA_002_C36_CGTACTAG-CTAAGCCT  cDNA_002_C65_CAGAGAGG-ACTGCATA  Zarkower_021_002_PCR_Bulk_GCTACGCT-GTAAGGAG
+
+#i="${file%.*}"
+
+do
+
+if [ ! -f "${i}.bam" ]
+then
+  echo "Submitting $i to queue."
+
+  sf1="${i}_L008_R1_001.fastq"
+#sf2="${i}_L001_R2_001.fastq"
+
+  cat << EOF > $i.pbs
+#PBS -l mem=20gb,nodes=1:ppn=1,walltime=02:00:00 
+#PBS -m a
+#PBS -M gearh006@umn.edu 
+#PBS -q lab 
+
+  module load samtools
+#mkdir $wd/$i
+  cd $wd/$i
+ 
+#NEXTERA Adapter removal
+java -Xmx16g -jar /home/bardwell/shared/Trimmomatic-0.32/trimmomatic-0.32.jar SE \
+-threads 1 -phred33 -trimlog log \
+$dd/$sf1  $i.R1_trimmed.fastq.gz \
+ILLUMINACLIP:../NexteraPE-PE.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:5 MINLEN:25 
+
+#run fastq after cutadapt
+gunzip $i.R1_trimmed.fastq.gz
+/home/bardwell/shared/FastQC/fastqc -o ../fastqc $i.R1_trimmed.fastq
+gunzip $i.R2_trimmed.fastq.gz
+/home/bardwell/shared/FastQC/fastqc -o ../fastqc $i.R2_trimmed.fastq
+
+#use STAR to map PE reads
+/home/bardwell/shared/STAR_2.3.0e/STAR  --genomeDir /home/bardwell/gearhart/dmrt1/ctv/star/genome/ \
+--runThreadN 8 --readFilesIn $i.R1_trimmed.fastq
+
+#convert sam to bam
+  samtools view -bS -o $i.raw.bam Aligned.out.sam 
+
+#sort the bam file
+  samtools sort $i.raw.bam $i.sort
+
+#remove duplicates
+  java -Xmx16g -jar /home/bardwell/shared/picard-tools-1.94/MarkDuplicates.jar \
+INPUT=$i.sort.bam OUTPUT=$i.bam REMOVE_DUPLICATES=true ASSUME_SORTED=true \
+METRICS_FILE=$i.metrics MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000 VALIDATION_STRINGENCY=LENIENT 
+
+#create the index file
+  samtools index $i.bam
+
+#igvtools to make a TDF File
+  java -Xmx16g  -jar /home/bardwell/shared/IGVTools_2/igvtools.jar count \
+-z 5 -w 25 -e 100 $i.bam $i.tdf /home/bardwell/shared/IGVTools_2/genomes/$org.genome
+
+  rm $i.sort.bam
+  rm $i.raw.bam
+
+  mv $i.bam /home/bardwell/gearhart/dmrt1/ctv/single_hiseq/
+  mv $i.bam.bai /home/bardwell/gearhart/dmrt1/ctv/single_hiseq/
+  mv $i.tdf /home/bardwell/gearhart/dmrt1/ctv/single_hiseq/
+#cp -rf ../fastqc/$i.* /home/bardwell/gearhart/dmrt1/ctv/single_hiseq/fastqc/
+EOF
+
+  qsub $i.pbs
+
+fi
+done
+```
+
+## Explore Single Cell data quality
+Reads for single cell analysis were counted as above for bulk tissue sequencing.
+```{r EDA} 
+load("ctv_single_mm9_100214_exonsByGene.rdata")
+load("ctv_single_mm9_100214_exonsByGene_miseq.rdata")
+cntsMiseq<-assays(miseq)$counts
+cntsHiseq<-assays(hiseq)$counts
+summary(colSums(cntsHiseq))
+summary(colSums(cntsMiseq))
+
+#reads
+cntsMiseq<-assays(miseq)$counts
+cntsHiseq<-assays(hiseq)$counts
+boxplot(log2(colSums(cntsMiseq)),log2(colSums(cntsHiseq)),names=c("MiSeq","HiSeq"),
+        ylab="Log2 Reads",main="Number of Reads Per Cell")
+
+#Count that number of genes that have 10 or more counts in each cell
+miSeq_geneNumber <- apply(cntsMiseq,2,function(x) sum(x>10))
+hiSeq_geneNumber <- apply(cntsHiseq,2,function(x) sum(x>10))
+#boxplot(miSeq_geneNumber,hiSeq_geneNumber,names=c("MiSeq","HiSeq"),ylab="Quantifiable Genes per Cell")
+
+#merge data
+temp<-sapply(strsplit(colnames(cntsMiseq),"-"), function(x) x[3])
+colnames(cntsMiseq)<-sapply(strsplit(temp,"_"), function(x) x[1])
+colnames(cntsMiseq)[1]<-"bulk"
+
+colnames(cntsHiseq)<-sapply(strsplit(colnames(cntsHiseq),"_"), function(x) x[3])
+colnames(cntsHiseq)[1]<-"bulk"
+sum(!colnames(cntsHiseq)==colnames(cntsMiseq))
+
+cnts<-cntsMiseq + cntsHiseq
+
+cnts_geneNumber <- apply(cntsHiseq,2,function(x) sum(x>10))
+boxplot(miSeq_geneNumber,hiSeq_geneNumber,cnts_geneNumber,
+        names=c("MiSeq","HiSeq","Combined"),ylab="Quantifiable Genes per Cell")
+
+#reduce matrix to quantifiable genes (excluding bulk sample)
+temp<-apply(cnts[,2:69],1,sum)>10
+sum(temp)
+cnts<-cnts[temp,]
+dim(cnts)
+
+#For every gene, count the number of cells that express that gene
+#Then create a histogram showing how many cells express express each bin # of genes
+#this doesn't show if these genes are all the same or not.
+hist(apply(cnts[,2:69],1,function(x) sum(x>10)),ylab="number of Genes",xlab="numbers of cells",
+     main="Genes per Cell Histogram")
+```
+
+```{r SingleCellpData}
+qc<-read.csv("zarkower_project_021_cDNA_QC.csv",stringsAsFactors=F,header=F)
+qc<-qc[qc$V7,]
+qc$label<-paste0("C",qc$V2)
+qc[69,"label"]<-"bulk"
+#names(cDNA)<-qc[,"label"]
+qc<-qc[,c("label","V4","V5","V3")]
+colnames(qc)<-c("label","cDNA","note","plate_pos")
+
+cDNA<-qc[,"cDNA"]
+names(cDNA)<-qc[,"label"]
+cDNA<-cDNA[sort(names(cDNA))]
+
+cnts_geneNumber[sort(names(cnts_geneNumber))]
+#plot 
+plot(cDNA[1:68],cnts_geneNumber[sort(names(cnts_geneNumber))][1:68],
+     cex=0.4,pch=19,xlab="cDNA Concentration",ylab="Number of Genes Detected",
+     main="Number of Genes Detected is Correlated with cDNA Concentration")
+
+#Calculate Correlation coefficient
+(temp<-cor(cDNA[1:68],cnts_geneNumber[sort(names(cnts_geneNumber))][1:68]))
+text(0.12,4800,paste0("Corr:  ",round(temp,3)))
+```
+
+
+## Count reads mapping to ERCC Spikes and CAG-DMRT1-IRES-GFP
+Since this RNA is not part of the mouse genome, they were mapped separately from the mm9 mapping above.  This section counts the reads in each of the four genes present in the bam files.
+```{r CountSpikes,eval=FALSE}
+spikeGR<-GRanges(seqnames=c("cags_dmrt1","spike1","spike4","spike7"),
+                 IRanges(start=c(7355,1,1,1),end=c(8071,740,990,1440)),
+                 strand="*",ID=c("gfp","spike1","spike4","spike7"))
+seqlengths(spikeGR)<-c(17287,777,1028,1474)
+(fls <- list.files("/mnt/afp/micah/R/umn-gcd-bioinformatics-ctv/spike", pattern=".bam$",full=TRUE))
+bamlst <- BamFileList(fls,yieldSize=5e4)
+detectCores()
+BiocParallel::register(MulticoreParam(workers=detectCores()))
+spikes <- summarizeOverlaps(spikeGR, bamlst, mode="Union",singleEnd=TRUE, ignore.strand=TRUE)
+save(spikes,spikeGR,file="spikes.rdata")
+```
+
+```{r Spike_EDA}
+load("spikes.rdata")
+apply(assays(spikes)$counts,1,sum)
+spikes<-assays(spikes)$counts
+rownames(spikes)<-spikeGR$ID
+colnames(spikes)<-sapply(strsplit(colnames(spikes),"_"), function(x) x[3])
+colnames(spikes)[1]<-"bulk"
+
+#is the Spike count correlated with the number of mapped reads?
+cor(spikes[2,2:69],colSums(cntsHiseq)[2:69])
+cor(spikes[3,2:69],colSums(cntsHiseq)[2:69])
+cor(spikes[4,2:69],colSums(cntsHiseq)[2:69])
+```
+
+## Create labels for Cells
+Sox9, Foxl2 and Dmrt1 were not detected in very many cells due to technological limitations.  This section creates labels for cells in which these markers were detected that could be added to the pData to help keep track of which ones they are.
+```{r Sox9Foxl2Dmrt1}
+labels<-as.data.frame(t(cnts[c("ENSMUSG00000000567","ENSMUSG00000050397","ENSMUSG00000024837"),]))
+colnames(labels)<-c("sox9","foxl2","dmrt1")
+sum(labels$sox9 >0)
+sum(labels$foxl2 >0)
+labels[labels$foxl2 >0 & labels$sox9 >0,]
+labels$col <- "none"
+labels$col[labels$foxl2 >10] <- "foxl2"
+labels$col[labels$sox9 >10] <- "sox9"
+labels$col[labels$foxl2 >10 & labels$sox9 >10] <- "both"
+colors = c("#0000FF","#FF0000","#545454","#00FF00")
+#colors = rainbow(length(unique(labels$col)))
+names(colors) = unique(labels$col)
+```
+
+## Normalization for Library Size and Gene Length with DESeq2
+Normalize counts based on median ratio method.  Use gene information from the Summarized experiment to export FPKM into Monocle.
+```{r DESeq2_Normalization}
+#mean(rownames(cntsHiseq)==rownames(cntsMiseq))
+#mean(colnames(cntsHiseq)==colnames(cntsMiseq))
+
+#Make a copy of hiseq Summarized Experiment
+HMseq<-hiseq
+#Combine Reads from both sequencing runs
+assays(HMseq)$counts<-assays(miseq)$counts+assays(hiseq)$counts
+cntsHMseq<-assays(HMseq)$counts
+colnames(cntsHMseq)<-sapply(strsplit(colnames(cntsHMseq),"_"), function(x) x[3])
+colnames(cntsHMseq)[1]<-"bulk"
+cntsHiseq[1:5,1:10]
+cntsMiseq[1:5,1:10]
+cntsHMseq[1:5,1:10]
+
+
+scdds <- DESeqDataSet(HMseq, design = ~ 1)
+scdds <- estimateSizeFactors( scdds )
+#sizeFactors(scdds)
+mapped_read_per_cell<-colSums(counts(scdds))
+names(mapped_read_per_cell)<-sapply(strsplit(names(mapped_read_per_cell),"_"), function(x) x[3])
+names(mapped_read_per_cell)[1]<-"bulk"
+cells<-fpkm(scdds)
+colnames(cells)<-sapply(strsplit(colnames(cells),"_"), function(x) x[3])
+#drop bulk sample
+#cells<-cells[,-1] DONT DROP YET
+#drop samples that were poorly represented
+#cells<-cells[rownames(cells) %in% rownames(cnts),]
+dim(cells)
+```
+
+# Monocle
+
+## Setup pData and featureData to create a CellDataSet
+```{r Monocle_Setup}
+#phenodata
+qc2<-merge(qc,labels,by.x="label",by.y=0)
+rownames(qc2)<-qc2$label
+qc2<-merge(qc2,as.data.frame(mapped_read_per_cell),by=0)
+rownames(qc2)<-qc2$label
+qc2<-qc2[,c("cDNA","note","plate_pos","sox9","foxl2","dmrt1","col","mapped_read_per_cell")]
+qc2<-qc2[!grepl("bulk",rownames(qc2)),]
+qcADF <- new("AnnotatedDataFrame", data = qc2)
+
+
+#featureData
+#fd<-select(org.Mm.eg.db,keys=rownames(cells),keytype="ENSEMBL",column="SYMBOL")
+#fd<-as.data.frame(fd[!duplicated(fd$ENSEMBL),])
+fd<-as.data.frame(cells[,1])
+colnames(fd)<-"Bulk_FPKM"
+blah<-select(org.Mm.eg.db,keys=rownames(fd),keytype="ENSEMBL",column="SYMBOL")
+fd$symbol<-blah[match(rownames(fd),blah$ENSEMBL),"SYMBOL"]
+
+idx<-match(rownames(fd),rownames(cag_dmrt1F_DF))
+fd$cag_dmrt1_logFC<-cag_dmrt1F_DF[idx,"log2FoldChange"]
+
+idx2<-match(rownames(fd),rownames(WT_resDF))
+fd$sex_logFC<-WT_resDF[idx2,"log2FoldChange"]
+fd[grep("Dmrt1",fd$symbol),]
+
+fdADF <- new("AnnotatedDataFrame", data = fd)
+
+#put the cells columns in the order of the phenodata
+CDS <- newCellDataSet(cells[,rownames(qc2)], phenoData = qcADF, featureData = fdADF)
+
+
+CDS <- detectGenes(CDS, min_expr = 0.1)
+print(head(fData(CDS)))
+
+#Identify cells that expressed in majority of cells
+expressed_genes <- row.names(subset(fData(CDS), num_cells_expressed >= nrow(pData(CDS))/2 ))
+length(expressed_genes)
+
+print(pData(CDS))
+#could change more filters (not double?)
+valid_cells <- row.names(subset(pData(CDS), note=="single" & mapped_read_per_cell > 750000))
+CDS <- CDS[,valid_cells]
+
+#QC
+L <- log(exprs(CDS[expressed_genes,]))
+# Standardize each gene, so that they are all on the same scale,
+# Then melt the data with plyr so we can plot it easily"
+melted_dens_df <- melt(t(scale(t(L))))
+# Plot the distribution of the standardized gene expression values.
+qplot(value, geom="density", data=melted_dens_df) + 
+  stat_function(fun = dnorm, size=0.5,color="red") +
+  xlab("Standardized log(FPKM)") +
+  ylab('density')
+     
+```
+
+## Select odering genes and create pseudotemperal ordering
+The following sections creates a pseudotemperal ordering that tries to reflect the transdifferentiation process.  Ordering genes were selected based on differential expression in the wild type vs mutant ovary as well as the testis vs ovary data.   The ordering genes were also selected from those transcripts that are expressed in more than half the cells.  
+```{r orderCells}
+#marker_genes <- row.names(subset(fData(CDS),
+#SYMBOL %in% c("Dmrt1","Foxl2","Sox8","Sox9","Cyp19a1","Ptgfr","Adcyap1")))
+
+ordering_genes <- row.names(subset(fData(CDS), abs(cag_dmrt1_logFC) > 2 & abs(sex_logFC) > 2 ))
+ordering_genes <- intersect(ordering_genes, expressed_genes)
+length(ordering_genes)
+fData(CDS)[ordering_genes,]
+
+CDS <- setOrderingFilter(CDS, ordering_genes)
+
+CDS <- reduceDimension(CDS, use_irlba=FALSE)
+CDS <- orderCells(CDS, num_paths=1, reverse=FALSE)
+
+plot_spanning_tree(CDS)
+
+#Dmrta1
+differentialGeneTest(CDS["ENSMUSG00000043753",], fullModelFormulaStr="expression~sm.ns(Pseudotime)")
+plot_genes_in_pseudotime(CDS[fData(CDS)$symbol=="Dmrta1",],color_by="State",cell_size=1.5) +
+  ggtitle("Dmrta1")
+
+#Gatm
+differentialGeneTest(CDS["ENSMUSG00000027199",], fullModelFormulaStr="expression~sm.ns(Pseudotime)")
+plot_genes_in_pseudotime(CDS[fData(CDS)$symbol=="Gatm",],color_by="State",cell_size=1.5) +
+  ggtitle("Gatm")
+
+#Cst9
+differentialGeneTest(CDS["ENSMUSG00000027445",], fullModelFormulaStr="expression~sm.ns(Pseudotime)")
+plot_genes_in_pseudotime(CDS[fData(CDS)$symbol=="Cst9",],color_by="State",cell_size=1.5) +
+  ggtitle("Cst9")
+
+#Esr2
+differentialGeneTest(CDS["ENSMUSG00000021055",], fullModelFormulaStr="expression~sm.ns(Pseudotime)")
+plot_genes_in_pseudotime(CDS[fData(CDS)$symbol=="Esr2",],color_by="State",cell_size=1.5) +
+  ggtitle("Esr2")
+
+
+plot_symbol_in_pseudotime <- function(gene) {
+  
+if (gene %in% rownames(fData(CDS))) {ens_name<-gene} else {
+  gene2<-paste0("^",gene,"$")
+  ens_name<-rownames(fData(CDS)[grep(gene2,fData(CDS)$symbol),])
+  }
+print(differentialGeneTest(CDS[ens_name,], fullModelFormulaStr="expression~sm.ns(Pseudotime)"))
+print(cag_dmrt1F_DF[ens_name,])
+plot_genes_in_pseudotime(CDS[ens_name,],color_by="State",cell_size=1.5) + ggtitle(gene)
+  }
+
+```
+
+# Compare expression in Pseudotime with Early Development
+To discover candidate genes that might play a role in transdifferentiation.  We tested genes that are differentially expressed early in development for significant variation throughout pseudotime as determined above.
+
+## Download published micrarray data from NCBI (GSE41948)
+This first section downloads the embroyonic data from GSE41948.  It is based on the automatic output from GEO2R.
+
+```{r GSE41948,eval=FALSE}
+gset <- getGEO("GSE41948", destdir="/mnt/afp/micah/R/umn-gcd-bioinformatics-ctv/",GSEMatrix =TRUE)
+if (length(gset) > 1) idx <- grep("GPL6885", attr(gset, "names")) else idx <- 1
+gset <- gset[[idx]]
+colnames(pData(gset))
+pData(gset)[1:5,]
+rownames(pData(gset))
+# make proper column names to match toptable 
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+
+#Subset the C57BL/6 data
+
+sml<-as.character(pData(gset)[,"title"])
+sel<-grep("C57BL",sml)
+sml<-sml[sel]
+bl6<-gset[,sel]
+
+# log2 transform
+ex <- exprs(bl6)
+qx <- as.numeric(quantile(ex, c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm=T))
+LogC <- (qx[5] > 100) ||
+          (qx[6]-qx[1] > 50 && qx[2] > 0) ||
+          (qx[2] > 0 && qx[2] < 1 && qx[4] > 1 && qx[4] < 2)
+if (LogC) { ex[which(ex <= 0)] <- NaN
+  exprs(bl6) <- log2(ex) }
+
+# set up the data and proceed with analysis
+fl <- as.factor(substr(sml,10,17))
+levels(fl)
+bl6$description <- fl
+design <- model.matrix(~ description + 0, bl6)
+colnames(design) <- levels(fl)
+fit <- lmFit(bl6, design)
+cont_matrix_11.6 <- makeContrasts(XX_E11.6-XY_E11.6, levels=design)
+cont_matrix_11.8 <- makeContrasts(XX_E11.8-XY_E11.8, levels=design)
+cont_matrix_12.0 <- makeContrasts(XX_E12.0-XY_E12.0, levels=design)
+fit_11.6 <- contrasts.fit(fit, cont_matrix_11.6)
+fit_11.8 <- contrasts.fit(fit, cont_matrix_11.8)
+fit_12.0 <- contrasts.fit(fit, cont_matrix_12.0)
+fit_11.6 <- eBayes(fit_11.6, 0.01)
+fit_11.8 <- eBayes(fit_11.8, 0.01)
+fit_12.0 <- eBayes(fit_12.0, 0.01)
+tT_11.6 <- topTable(fit_11.6, adjust="fdr", sort.by="none", number=nrow(ex))
+tT_11.8 <- topTable(fit_11.8, adjust="fdr", sort.by="none", number=nrow(ex))
+tT_12.0 <- topTable(fit_12.0, adjust="fdr", sort.by="none", number=nrow(ex))
+mean(rownames(tT_11.8)==rownames(tT_12.0))
+tT<-tT_12.0
+colnames(tT)
+tT$logFC_11.6 <- tT_11.6$logFC
+tT$padj_11.6 <- tT_11.6$adj.P.Val
+tT$logFC_11.8 <- tT_11.8$logFC
+tT$padj_11.8 <- tT_11.8$adj.P.Val
+
+# load NCBI platform annotation
+gpl <- annotation(gset)
+platf <- getGEO(gpl, destdir="/mnt/afp/micah/R/umn-gcd-bioinformatics-ctv/", AnnotGPL=TRUE)
+ncbifd <- data.frame(attr(dataTable(platf), "table"))
+
+# replace original platform annotation
+tT <- tT[setdiff(colnames(tT), setdiff(fvarLabels(bl6), "ID"))]
+tT <- merge(tT, ncbifd, by="ID")
+tT <- tT[order(-tT$logFC), ]  # restore correct order
+
+tT <- subset(tT, select=c("ID","padj_11.6","padj_11.8","adj.P.Val","t","B", 
+                          "logFC_11.6","logFC_11.8","logFC","Gene.symbol","Gene.ID"))
+tT<-tT[tT$adj.P.Val<0.05 | tT$padj_11.8<0.05 | tT$padj_11.6<0.05,]
+
+#load expression values into variable ex
+ex<-as.data.frame(exprs(bl6))
+colnames(ex)<-paste0(substr(sml,10,17),substr(sml,24,28))
+ex$probe<-rownames(ex)
+
+save(ex,tT,file="GSE41948.rdata")
+
+```
+
+## Vizualize early gene expression changes for male and female
+This section creates a function that will plot the microarray data for a given gene.
+
+```{r loadGSE41948}
+load(file="GSE41948.rdata")
+
+plotEmbryonicData <- function(gene) {
+ids=as.character(tT[grep(paste0("^", gene, "$"),tT$Gene.symbol),"ID"])
+temp<-melt(ex[ids,],id.vars="probe",factorsAsStrings=T)
+temp$sex<-as.factor(unlist(strsplit(as.character(temp$variable),
+                                    "_"))[seq(from = 1, to = 3 * nrow(temp), by = 3)])
+temp$time<-as.factor(unlist(strsplit(as.character(temp$variable),
+                                     "_"))[seq(from = 1, to = 3 * nrow(temp), by = 3)+1])
+temp<-temp[,-grep("variable",colnames(temp))]
+p <- ggplot(temp, aes(x = time, y = value, fill = sex)) + facet_grid(. ~ probe)
+    p + geom_boxplot() + theme_bw() + ggtitle(gene)
+}
+
+plotEmbryonicData("Sox9")
+```
+
+## Test early dimorphic genes for variation in pseudotime
+This section performs a statistical test on the genes of interest.
+
+```{r identifyTestGenes,warning=FALSE}
+# Differentially expressed at E11.6,E11.8 or E12.0 in Black6 mice
+test_genes<-tT$Gene.ID
+#Gene Ensemble IDs
+test_genes <- select(org.Mm.eg.db, keys=test_genes, columns="ENSEMBL",keytype="ENTREZID")$ENSEMBL
+#remove duplicates from multiple probes
+test_genes<-test_genes[!duplicated(test_genes)]
+#make sure gene is in Single_Cell Dataset
+test_genes<-test_genes[test_genes %in% rownames(CDS)]
+
+test_genes<-test_genes[test_genes %in% rownames(fData(CDS)[fData(CDS)$num_cells_expressed > 5,])]
+test_genes<-test_genes[!test_genes %in% ordering_genes]
+length(test_genes)
+#check to make sure data is all there
+mean(is.na(exprs(CDS[test_genes,])))
+```
+
+```{r pseudotime_contrast,eval=FALSE}
+#now do differential expression on dimorphic genes
+diff_test_res<- differentialGeneTest(CDS[test_genes,], 
+                                     fullModelFormulaStr="expression~sm.ns(Pseudotime)")
+save(diff_test_res,file="diff_test_res.rdata")
+````
+
+##Create Figure 3C & Supplmental Table 1c
+```{r visualizePseudotime}
+load("diff_test_res.rdata")
+#merge with fData
+diff_test_res2 <- merge(fData(CDS), diff_test_res, by=0)
+rownames(diff_test_res2)<-diff_test_res2$Row.names
+diff_test_res2<-diff_test_res2[,-1]
+diff_test_res2_subset<-subset(diff_test_res2,pval<0.05  & num_cells_expressed>10)
+colnames(diff_test_res2_subset)<-c("Bulk Sequencing FPKM","Gene Symbol","WT vs CAG Ovary log2FC",
+                                   "Testis vs Ovary log2FC","# cells > 0.1 FPKM",
+                                   "Used To Order Pseudotime","Status","Pval","Qval")
+diff_test_res2_subset<-diff_test_res2_subset[,colnames(diff_test_res2_subset)!="Status"]
+write.csv(diff_test_res2_subset,"Supplemental_Table_1c.csv",quote=F)
+
+
+#used for Ordering
+gene<-"Serpine2"
+a1<-plot_symbol_in_pseudotime(gene)
+b1<-plotEmbryonicData(gene)
+grid.arrange(b1,a1, ncol=1, main = gene)
+
+gene<-"Cst9"
+a2<-plot_symbol_in_pseudotime(gene)
+b2<-plotEmbryonicData(gene)
+grid.arrange(b2,a2, ncol=1, main = gene)
+
+#Ordered by pseudotime (~high correlation to ordering genes)
+gene<-"Gstm2"
+a3<-plot_symbol_in_pseudotime(gene)
+b3<-plotEmbryonicData(gene)
+grid.arrange(b3,a3, ncol=1, main = gene)
+
+gene<-"Mmp2"
+a4<-plot_symbol_in_pseudotime(gene)
+b4<-plotEmbryonicData(gene)
+grid.arrange(b4,a4, ncol=1, main = gene)
+
+gene<-"Sdc4"
+a5<-plot_symbol_in_pseudotime(gene)
+b5<-plotEmbryonicData(gene)
+grid.arrange(b5,a5, ncol=1, main = gene)
+
+gene<-"Col1a1" #not expressed in microarray
+a6<-plot_symbol_in_pseudotime(gene)
+#b6<-plotEmbryonicData(gene)
+grid.arrange(a6, ncol=1, main = gene)
+
+grid.arrange(a1,a3,a4,a2,a5,a6,ncol=3,main="Dimorphic Genes in Pseudotime")
+```
+
+# Session Info
+```{r sessionInfo}
+sessionInfo()
+```
+
