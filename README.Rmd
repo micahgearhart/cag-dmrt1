@@ -1,8 +1,8 @@
 ---
-title: "Sexual cell fate reprogramming in the ovary by DMRT1"
-author: "Robin E. Lindeman, Micah D. Gearhart, Anna Minkina, Anthony D. Krentz, Vivian J. Bardwell, and David Zarkower"
+title: "Bioinformatics Supplement, Lindeman et. al."
+author: "Micah D. Gearhart"
 date: "10/24/2014"
-abstract: This document contains an annotated workflow of the informatics analyses including software settings and options, diagnostic plots of data quality and methods for statistical tests that can be reproduced in the R programming language.  The source code is available at https://github.com/micahgearhart/umn-gcd-bioinformatics-cag.
+abstract: This document contains an annotated workflow of the informatics analyses including software settings and options, diagnostic plots of data quality and methods for statistical tests that can be reproduced in the R programming language.  The source code is available at https://github.com/micahgearhart/cag-dmrt1.
 
 output:
   pdf_document: 
@@ -40,6 +40,7 @@ library(Rsamtools)
 
 #Single Cell
 library(monocle)
+library(scde)
 
 #For Published Microarray
 library(Biobase)
@@ -141,7 +142,7 @@ done
 This section counts the reads in genes defined by the ENSEMBL 2012 Transcript DB and loads the data into a Summarized Experiment.
 
 ```{r CountRNASeq, eval=FALSE}
-load("exonsByGene_mm9_biomart_ensembl.rdata")
+load("inst//extdata//exonsByGene_mm9_biomart_ensembl.rdata")
 (fls <- list.files("mm9", pattern=glob2rx("*_*.bam"),full=TRUE))
 bamlst <- BamFileList(fls,yieldSize=1000000)
 BiocParallel::register(MulticoreParam(workers=4))
@@ -151,10 +152,11 @@ cag_dmrt1 <- GenomicAlignments::summarizeOverlaps(exonsByGene, bamlst,
 save(cag_dmrt1,file="cag_dmrt1.rdata")
 ```
 
-###Load summarized experiment and annotate the samples.
+
+### DELETE ME
 ```{r load_bulk_rnaseq_data}
-load("cag_dmrt1.rdata")
-load("exonsByGene_mm9_biomart_ensembl.rdata")
+load("inst//extdata//cag_dmrt1.rdata")
+load("inst//extdata//exonsByGene_mm9_biomart_ensembl.rdata")
 colData(cag_dmrt1)@rownames 
 colData(cag_dmrt1)@rownames <- sapply(strsplit(colData(cag_dmrt1)@rownames,"_"),"[[",1)
 colData(cag_dmrt1)$sex<-as.factor(c("Female","Female","Female","Female","Male","Male"))
@@ -166,7 +168,97 @@ levels(colData(cag_dmrt1)$dmrt1)
 
 ### DESeq2
 Use DESeq2 to identify differentially expressed genes between wild type and mutant ovaries.
+```{r unified_DESeq2}
+#Load summarized experiment and annotate the samples.
+load("inst//extdata//cag_dmrt1.rdata")
+load("inst//extdata//exonsByGene_mm9_biomart_ensembl.rdata")
+colData(cag_dmrt1)@rownames 
+colData(cag_dmrt1)@rownames <- sapply(strsplit(colData(cag_dmrt1)@rownames,"_"),"[[",1)
+colData(cag_dmrt1)$group<-as.factor(c("cag_female","cag_female","wt_female","wt_female","wt_male","wt_male"))
+colData(cag_dmrt1)
+levels(colData(cag_dmrt1)$group)
 
+cag_dmrt1_dds <- DESeqDataSet(cag_dmrt1, design = ~group   )
+cag_dmrt1_dds <- estimateSizeFactors(cag_dmrt1_dds )
+sizeFactors(cag_dmrt1_dds)
+colSums(counts(cag_dmrt1_dds))
+
+#Run PCA blind for QA
+#rld<-DESeq2::rlog(cag_dmrt1_dds,blind=TRUE)
+#p_blind<-plotPCA(rld,intgroup=c("group")) + theme_bw() +
+#  ggtitle("condition blind rlog transformed,normalized counts")
+
+#Run PCA to show condition relationships
+rld<-DESeq2::rlog(cag_dmrt1_dds,blind=FALSE)
+plotPCA(rld,intgroup=c("group")) + theme_bw() +
+  ggtitle("Condition Aware rlog transformed,normalized counts")
+
+cag_dmrt1_dds <- DESeq( cag_dmrt1_dds )
+
+#plotDispEsts(cag_dmrt1_dds)
+#DESeq2::plotMA(cag_dmrt1_dds)
+```
+
+###Apply contrast to create results table for ovarian expression changes
+```{r ovary_contrast}
+cag_dmrt1F_res<-results(cag_dmrt1_dds,contrast=c("group","cag_female","wt_female"))
+
+hist(cag_dmrt1F_res$pvalue, breaks=40, col="grey",main="Ovary P-value Distribution")
+
+#use full results names for writing out table below
+resNames<-mcols(cag_dmrt1F_res)$description
+names(resNames)<-colnames(cag_dmrt1F_res)
+
+#Convert Results to DataFrame
+cag_dmrt1F_DF <-as.data.frame(cag_dmrt1F_res[!is.na(cag_dmrt1F_res$padj),])
+#remove padj NAs
+#cag_dmrt1F_DF<-cag_dmrt1F_DF[!is.na(cag_dmrt1F_DF$padj),]
+
+#Add Symbol and EntrezID annotations
+blah<-AnnotationDbi::select(org.Mm.eg.db,keys=rownames(cag_dmrt1F_DF),keytype="ENSEMBL",
+             column=c("SYMBOL","ENTREZID"))
+cag_dmrt1F_DF$symbol<-blah[match(rownames(cag_dmrt1F_DF),blah$ENSEMBL),"SYMBOL"]
+cag_dmrt1F_DF$ENTREZID<-blah[match(rownames(cag_dmrt1F_DF),blah$ENSEMBL),"ENTREZID"]
+
+#Add Chromosomal Location to table
+temp<-as.data.frame(seqnames(exonsByGene))
+temp<-temp[!duplicated(temp$group_name),]
+idx<-match(rownames(cag_dmrt1F_DF),temp$group_name)
+cag_dmrt1F_DF$CHR<-temp[idx,"value"]
+
+#Now remove pseudogene artifacts on chrY
+cag_dmrt1F_DF<-cag_dmrt1F_DF[cag_dmrt1F_DF$CHR!="chrY",]
+
+#Add RA response category to table based on this 2002 paper:
+#http://www.jlr.org/content/43/11/1773.full
+ra<-read.csv("inst//extdata//retinoic_acid.csv",stringsAsFactors=F)
+ra<-ra[,c("Symbol","Cat")]
+colnames(ra)[1]<-"symbol"
+ra<-ra[!is.na(ra$Cat),]
+ra$symbol<-capitalize(tolower(ra$symbol))
+idx<-match(tolower(cag_dmrt1F_DF$symbol),tolower(ra$symbol))
+#sum(!is.na(idx)) #373 ra responsive genes expressed in ovary
+cag_dmrt1F_DF$raClass<-ra[idx,"Cat"]
+cag_dmrt1F_DF[is.na(cag_dmrt1F_DF$raClass),"raClass"]<-0
+#table(cag_dmrt1F_DF$raClass)
+
+#order
+cag_dmrt1F_DF<-cag_dmrt1F_DF[with(cag_dmrt1F_DF,order(-log2FoldChange)),]
+
+#Sanity Check
+temp<-c("Sox9","Foxl2","Dmrt1","Pou5f1","Gapdh","Hsd17b3","Insl3","Cyp19a1")
+cag_dmrt1F_DF[cag_dmrt1F_DF$symbol %in% temp,]
+
+cag_dmrt1F_DF[cag_dmrt1F_DF$raClass==3,]
+
+#Subset DataFrame with Significantly Enriched Dmrt1 Genes
+cag_dmrt1F_DF_subset<-cag_dmrt1F_DF[which(cag_dmrt1F_DF$padj < 0.05 &
+                                            abs(cag_dmrt1F_DF$log2FoldChange) > 1),]
+nrow(subset(cag_dmrt1F_DF_subset,log2FoldChange >1))
+nrow(subset(cag_dmrt1F_DF_subset,log2FoldChange <1))
+```
+
+##DELETE ME
 ```{r ovary_contrast}
 #Subset the Summarized Experiment to only include the Female Data
 colData(cag_dmrt1)
@@ -188,37 +280,6 @@ cag_dmrt1F_res <- results( cag_dmrt1F_dds )
 #head(cag_dmrt1F_res)
 #plotDispEsts(cag_dmrt1F_dds)
 #DESeq2::plotMA(cag_dmrt1F_dds)
-hist(cag_dmrt1F_res$pvalue, breaks=40, col="grey",main="Ovary P-value Distribution")
-
-#use full results names for writing out table below
-resNames<-mcols(cag_dmrt1F_res)$description
-names(resNames)<-colnames(cag_dmrt1F_res)
-
-#Convert Results to DataFrame
-cag_dmrt1F_DF <-as.data.frame(cag_dmrt1F_res[!is.na(cag_dmrt1F_res$stat),])
-blah<-select(org.Mm.eg.db,keys=rownames(cag_dmrt1F_DF),keytype="ENSEMBL",
-             column=c("SYMBOL","ENTREZID"))
-cag_dmrt1F_DF$symbol<-blah[match(rownames(cag_dmrt1F_DF),blah$ENSEMBL),"SYMBOL"]
-cag_dmrt1F_DF$ENTREZID<-blah[match(rownames(cag_dmrt1F_DF),blah$ENSEMBL),"ENTREZID"]
-
-#Add Chromosomal Location to table
-temp<-as.data.frame(seqnames(exonsByGene))
-temp<-temp[!duplicated(temp$group_name),]
-idx<-match(rownames(cag_dmrt1F_DF),temp$group_name)
-cag_dmrt1F_DF$CHR<-temp[idx,"value"]
-
-#order
-cag_dmrt1F_DF<-cag_dmrt1F_DF[with(cag_dmrt1F_DF,order(-log2FoldChange)),]
-
-#Sanity Check
-temp<-c("Sox9","Foxl2","Dmrt1","Pou5f1","Gapdh","Hsd17b3","Insl3","Cyp19a1")
-cag_dmrt1F_DF[cag_dmrt1F_DF$symbol %in% temp,]
-
-#Subset DataFrame with Significantly Enriched Dmrt1 Genes
-cag_dmrt1F_DF_subset<-cag_dmrt1F_DF[which(cag_dmrt1F_DF$padj < 0.05 &
-                                            abs(cag_dmrt1F_DF$log2FoldChange) > 2),]
-nrow(subset(cag_dmrt1F_DF_subset,log2FoldChange >2))
-nrow(subset(cag_dmrt1F_DF_subset,log2FoldChange <2))
 ```
 
 # Analysis of X Chromosome Enrichment
@@ -270,7 +331,6 @@ CHR = chr) }
 
 
 gsea<-do.call( rbind, lapply( rownames(incm)[1:20], testCategory ) )
-#gsea$avgLFC<-gsea$avgLFC/mean(gsea$avgLFC)
 sum(gsea$numGenes)
 gsea$padj<-p.adjust(gsea$pvalue,"BH")
 gsea<-gsea[,c("chr","numGenes","avgLFC","strength","pvalue","padj")]
@@ -278,17 +338,71 @@ colnames(gsea)<-c("chr","gsea_numGenes","gsea_avgLFC","gsea_strength","gsea_pval
 chrdata<-merge(chrdata,gsea,by.x=0,by.y="chr")
 rownames(chrdata)<-chrdata[,1]
 chrdata<-chrdata[,c("total_balls","drawn_balls","pval","gsea_avgLFC",
-                    "gsea_strength","gsea_pvalue","gsea_padj")]
-colnames(chrdata)<-c("genes_on_chr","enriched_genes_on_chr","hypergeometeric_padj",
-                     "gsea_avgLFC","gsea_strength","gsea_pvalue","gsea_padj")
+                    "gsea_strength","gsea_padj")]
+colnames(chrdata)<-c("Genes_in_Catagory","Enriched_Genes_in_Catagory","Hypergeometeric_padj",
+                     "GSEA_avgLFC","GSEA_strength","GSEA_padj")
 (chrdata<-chrdata[paste0("chr",c(1:19,"X")),])
 
 #Center the avglogFC values
-chrdata$gsea_avgLFC<-chrdata$gsea_avgLFC-mean(chrdata$gsea_avgLFC)
+chrdata$GSEA_avgLFC<-chrdata$GSEA_avgLFC-mean(chrdata$GSEA_avgLFC)
 
-write.csv(chrdata,file="Supplemental_Table_1b.csv",quote=F)
+#write.csv(chrdata,file="Supplemental_Table_1b.csv",quote=F)
 ```
 <div class="pagebreak"></div>
+
+## GSEA on Retinoic Acid Responsive Genes
+```{r}
+#Hypergeometric Test
+total_balls<-table(cag_dmrt1F_DF$raClass)
+drawn_balls<-table(cag_dmrt1F_DF_subset$raClass)
+radata<-as.data.frame(rbind(total_balls,drawn_balls,pval=0))
+
+calcHyper<-function (cat) {
+  (q<-radata["drawn_balls",cat]) #number of white balls drawn from urn
+  (k<-sum(radata["drawn_balls",])) #total number of balls drawn from urn
+  (m<-radata["total_balls",cat]) #number of white balls in the urn
+  (n<-sum(radata["total_balls",])-m) #number of black balls in the urn
+phyper(q,m,n,k,lower.tail = FALSE)
+}
+
+for (i in colnames(radata)) {radata["pval",i]<-calcHyper(i)}
+radata<-t(radata)
+radata[,"pval"]<-p.adjust(radata[,"pval"],"BH")
+radata
+
+#GSEA-like test
+
+incm <- do.call( rbind, with(res2, tapply(ENSEMBL, raClass, function(x) raClass == res2[x,"raClass"] ) ))
+colnames(incm) <- res2$ENSEMBL
+str(incm)
+rowSums(incm)
+mean(colSums(incm)==1)
+
+testCategory <- function( cat ) {
+isMember <- incm[ cat, ]
+data.frame(
+cat = cat,
+numGenes = sum( isMember ),
+GSEA_avgLFC = mean( res2$log2FoldChange[isMember] ),
+GSEA_strength = sum( res2$log2FoldChange[isMember] ) / sqrt(sum(isMember)),
+GSEA_pval = t.test( res2$log2FoldChange[ isMember ] )$p.value) }
+
+gseaRA<-do.call( rbind, lapply( rownames(incm), testCategory ) )
+gseaRA$GSEA_pval<-p.adjust(gseaRA$GSEA_pval,"BH")
+
+#combine into table
+radata<-merge(radata,gseaRA,by.x=0,by.y="cat")
+rownames(radata)<-paste0("RA Response Class ",radata[,1])
+radata<-radata[,c("total_balls","drawn_balls","pval","GSEA_avgLFC",
+                    "GSEA_strength","GSEA_pval")]
+colnames(radata)<-c("Genes_in_Catagory","Enriched_Genes_in_Catagory","Hypergeometeric_padj",
+                     "GSEA_avgLFC","GSEA_strength","GSEA_padj")
+
+temp<-rbind(chrdata,radata)
+write.csv(temp,file="Supplemental_Table_1b.csv",quote=F)
+```
+
+
 ## Vizualize ChrX Enrichment - Figure S2
 Create figures for the Chromosome X data to be included in the supplement.
 
@@ -319,10 +433,38 @@ p <- p + layout_karyogram(log5_genes, geom = "rect", ylim = c(11, 21), color = "
 p
 ```
 <div class="pagebreak"></div>
+### Alternative to Figure S2B - Boxplots of Log2Fold Changes
+```{r S2Boxplot}
+temp<-cag_dmrt1F_DF
+temp<-temp[temp$CHR %in% paste0("chr",c(1:19,"X")),]
+temp$CHR<-droplevels(temp$CHR)
+#levels(temp$CHR)<-rev(levels(temp$CHR))
 
-### Supplemental Figure S2B - PieChart
+#set up colors based on GSEA_strength
 
-```{r PieChart,warning=FALSE,fig.height=8}
+q2<-ggplot(temp,aes(x=CHR,y=log2FoldChange,fill=CHR)) + theme_bw()+
+  geom_boxplot(aes(fill=CHR))+
+  scale_fill_manual(values=pal(20)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(x=NULL,y="Log2 Fold Change")+
+  coord_flip()+scale_x_discrete(limits=c(paste0("chr",c("X",19:1)))) +
+  ylim(-8,12) + theme(legend.position="none")
+
+#q2<-ggplot(temp,aes(x=CHR,y=log2FoldChange,fill=CHR)) + theme_bw()+
+#  geom_boxplot() + scale_fill_brewer(pallete="Pastel2") +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   coord_flip()+scale_x_discrete(limits=c(paste0("chr",c("X",19:1)))) +ylim(-8,12)
+#q2
+```
+
+
+### Supplemental Figure S2C - PieChart
+
+```{r S2PieChart,warning=FALSE,fig.height=8}
+#create a color pallete
+colors <- brewer.pal(4, "YlOrRd")
+pal <- colorRampPalette(colors)
+
 #pie chart
 (num_onX<-nrow(subset(log5_enriched,CHR=="chrX")))
 (total<-nrow(log5_enriched))
@@ -331,42 +473,57 @@ num_onX/total
 temp<-as.data.frame(table(log5_enriched[,"CHR"]))
 temp<-temp[temp$Var1 %in% paste0("chr",c(1:19,"X")), ]
 colnames(temp)<-c("Chromosome","Number_of_Enriched_Genes")
+temp$Chromosome<-droplevels(temp$Chromosome)
+#levels(temp$Chromosome)<-rev(levels(temp$Chromosome))
+#temp$Number_of_Enriched_Genes<-rev(temp$Number_of_Enriched_Genes)
 
 pie <- ggplot(temp,aes(x="", y=Number_of_Enriched_Genes, fill = Chromosome )) +
-       geom_bar(width = 1,stat="identity",colour="black") + coord_polar(theta="y") +
-       geom_text(aes(x=1.7,y = 122, label = "chrX")) +  theme_bw()
-pie
+       geom_bar(aes(fill=Chromosome),width = 1,stat="identity",colour="black") + 
+       coord_polar(theta="y") +
+       geom_text(aes(x=1.7,y = 250, label = "chrX")) +  theme_bw() +
+       scale_fill_manual(values=pal(20))
+```
+
+### Supplemental Figure S2D - Gene Set Enrichment Score Plot
+```{r S2plotGSEA,warning=FALSE}
+#Plot AvgLFC across chromosomes
+#temp<-data.frame(score=chrdata$GSEA_strength,chromosome=rownames(chrdata))
+#levels(temp$chromosome)<-rev(rownames(chrdata))
+#temp<-melt(temp,value.name="score")
+#plot gsea_avgLFC
+q1<-data.frame(score=chrdata$GSEA_strength,
+               chromosome=factor(rownames(chrdata),levels=paste0("chr",c(1:19,"X")))
+               ) %>%
+   ggplot(aes(x=chromosome,y=score)) +
+   geom_bar(aes(fill=chromosome),stat = "identity",color="black") + theme_bw() +
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+   coord_flip() + scale_x_discrete(limits=c(paste0("chr",c("X",19:1))))+
+   labs(y="Enrichment Score",x="Chromosome") +scale_fill_manual(values=pal(20)) +
+   theme(legend.position="none")
 ```
 <div class="pagebreak"></div>
 
-### Supplemental Figure S2C - GSEA
-```{r plotGSEA,warning=FALSE}
-#Plot AvgLFC across chromosomes
-temp<-data.frame(avgLFC=chrdata$gsea_avgLFC,chromosome=rev(rownames(chrdata)))
-levels(temp$chromosome)<-rev(rownames(chrdata))
-temp<-melt(temp,value.name="avgLFC")
-#plot gsea_avgLFC
-q<-ggplot(temp,aes(x=chromosome,y=avgLFC)) +geom_bar(stat = "identity") + theme_bw() +
-   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
-   coord_flip()
-q 
+### Supplemental Figure S2  
+``{r}
+grid.arrange(q2,q1,pie,ncol=3,main="A Subset of Genes on Chromosome X are Highly Upregulated")
 ```
-<div class="pagebreak"></div>
 
 ## Create a heatmap to visualize extent of transdifferentiation -- Figure 3A
 Plot FPKM values for wild type and mutant ovary next to expression values for testis.   Rather than create clusters, sort the genes from female enriched (top) to male enriched(bottom) and vizualize mutant ovaries in between.
-```{r heatmap}
+```{r 3Aheatmap}
 #Normalize the Entire Dataset
-cag_dds <- DESeqDataSet(cag_dmrt1, design = ~1   )
-cag_dds <- estimateSizeFactors(cag_dds )
-sizeFactors(cag_dds)
-colSums(counts(cag_dds))
+#cag_dds <- DESeqDataSet(cag_dmrt1, design = ~1   )
+#cag_dds <- estimateSizeFactors(cag_dds )
+#sizeFactors(cag_dds)
+#colSums(counts(cag_dds))
+
 
 #extract fpkm values
-rd<-as.data.frame(fpkm(cag_dds))
+#rd<-as.data.frame(fpkm(cag_dmrt1_dds))
+rd<-as.data.frame(fpkm(cag_dmrt1_dds))
 
 #subset for differentially expressed genes
-rd<-rd[rownames(rd) %in% rownames(cag_dmrt1F_DF_subset),]
+rd<-rd[rownames(rd) %in% rownames(subset(cag_dmrt1F_DF,abs(log2FoldChange) >2)),]
 rd<-rd[,c(3,4,1,2,5,6)]
 
 #rd4<-rd3
@@ -384,8 +541,9 @@ aheatmap(log2(rd+0.25),Rowv=NA,Colv=NA,color="PRGn",scale="row", annCol=labels)
 # WT Ovary vs Testis RNA-Seq
 
 ## Use wt RNA-SEQ to Identify Male and Female Specific Genes
-Count reads for the wild type samples.
 
+###DELETE ME
+Count reads for the wild type samples.
 ```{r Count_WT, eval=FALSE}
 load("../dmrt6/exonsByGene_mm9_biomart_ensembl.rdata")
 (fls <- list.files("mm9", pattern=glob2rx("WTm*.bam"),full=TRUE))
@@ -397,7 +555,7 @@ WT<- summarizeOverlaps(exonsByGene, bamlst, mode="Union",singleEnd=FALSE, ignore
 save(WT,file="wt_testis_ovary_data.rdata")
 ```
 
-
+### DELETE ME
 Determine logFC between male and female gonads to identify sex specific transcripts.
 ``` {r WT_DESeq2}
 load("wt_testis_ovary_data.rdata")
@@ -416,13 +574,21 @@ resultsNames(WT_dds)
 head(WT_res)
 #plotDispEsts(WT_dds)
 #DESeq2::plotMA(WT_res)
+```
+
+
+```{r wildType_contrast}
+WT_res<-results(cag_dmrt1_dds, contrast=c("group","wt_male","wt_female"))
 hist(WT_res$pvalue, breaks=40, col="grey")
 
-blah<-select(org.Mm.eg.db,keys=rownames(WT),keytype="ENSEMBL",column="SYMBOL")
+#Annotate with Gene Symbol
+blah<-AnnotationDbi::select(org.Mm.eg.db,keys=rownames(WT_res),keytype="ENSEMBL",column="SYMBOL")
 WT_res$symbol<-blah[match(rownames(WT_res),blah$ENSEMBL),"SYMBOL"]
-WT_res[grep("Foxl2",WT_res$symbol),]
-WT_res[grep("Sox9",WT_res$symbol),]
-WT_res[grep("Cyp19a1",WT_res$symbol),]
+
+#Sanity Check
+temp<-c("Sox9","Foxl2","Dmrt1","Pou5f1","Gapdh","Hsd17b3","Insl3","Cyp19a1")
+WT_res[WT_res$symbol %in% temp,]
+
 WT_resDF<-as.data.frame(WT_res)
 #remove NAs
 WT_resDF<-WT_resDF[!is.na(WT_resDF$padj),]
@@ -757,8 +923,8 @@ done
 ## Explore Single Cell data quality
 Reads for single cell analysis were counted as above for bulk tissue sequencing.
 ```{r EDA} 
-load("ctv_single_mm9_100214_exonsByGene.rdata")
-load("ctv_single_mm9_100214_exonsByGene_miseq.rdata")
+load("inst/extdata/ctv_single_mm9_100214_exonsByGene.rdata")
+load("inst/extdata/ctv_single_mm9_100214_exonsByGene_miseq.rdata")
 cntsMiseq<-assays(miseq)$counts
 cntsHiseq<-assays(hiseq)$counts
 summary(colSums(cntsHiseq))
@@ -804,7 +970,7 @@ hist(apply(cnts[,2:69],1,function(x) sum(x>10)),ylab="number of Genes",xlab="num
 ```
 
 ```{r SingleCellpData}
-qc<-read.csv("zarkower_project_021_cDNA_QC.csv",stringsAsFactors=F,header=F)
+qc<-read.csv("inst/extdata/zarkower_project_021_cDNA_QC.csv",stringsAsFactors=F,header=F)
 qc<-qc[qc$V7,]
 qc$label<-paste0("C",qc$V2)
 qc[69,"label"]<-"bulk"
@@ -844,7 +1010,7 @@ save(spikes,spikeGR,file="spikes.rdata")
 ```
 
 ```{r Spike_EDA}
-load("spikes.rdata")
+load("inst/extdata/spikes.rdata")
 apply(assays(spikes)$counts,1,sum)
 spikes<-assays(spikes)$counts
 rownames(spikes)<-spikeGR$ID
@@ -926,7 +1092,7 @@ qcADF <- new("AnnotatedDataFrame", data = qc2)
 #fd<-as.data.frame(fd[!duplicated(fd$ENSEMBL),])
 fd<-as.data.frame(cells[,1])
 colnames(fd)<-"Bulk_FPKM"
-blah<-select(org.Mm.eg.db,keys=rownames(fd),keytype="ENSEMBL",column="SYMBOL")
+blah<-AnnotationDbi::select(org.Mm.eg.db,keys=rownames(fd),keytype="ENSEMBL",column="SYMBOL")
 fd$symbol<-blah[match(rownames(fd),blah$ENSEMBL),"SYMBOL"]
 
 idx<-match(rownames(fd),rownames(cag_dmrt1F_DF))
@@ -981,7 +1147,7 @@ fData(CDS)[ordering_genes,]
 CDS <- setOrderingFilter(CDS, ordering_genes)
 
 CDS <- reduceDimension(CDS, use_irlba=FALSE)
-CDS <- orderCells(CDS, num_paths=1, reverse=FALSE)
+CDS <- orderCells(CDS, num_paths=1, reverse=TRUE)
 
 plot_spanning_tree(CDS)
 
@@ -1105,7 +1271,7 @@ save(ex,tT,file="GSE41948.rdata")
 This section creates a function that will plot the microarray data for a given gene.
 
 ```{r loadGSE41948}
-load(file="GSE41948.rdata")
+load(file="inst/extdata/GSE41948.rdata")
 
 plotEmbryonicData <- function(gene) {
 ids=as.character(tT[grep(paste0("^", gene, "$"),tT$Gene.symbol),"ID"])
@@ -1129,10 +1295,11 @@ This section performs a statistical test on the genes of interest.
 # Differentially expressed at E11.6,E11.8 or E12.0 in Black6 mice
 test_genes<-tT$Gene.ID
 #Gene Ensemble IDs
-test_genes <- select(org.Mm.eg.db, keys=test_genes, columns="ENSEMBL",keytype="ENTREZID")$ENSEMBL
+test_genes <- AnnotationDbi::select(org.Mm.eg.db, keys=test_genes, columns="ENSEMBL",keytype="ENTREZID")$ENSEMBL
 #remove duplicates from multiple probes
 test_genes<-test_genes[!duplicated(test_genes)]
 #make sure gene is in Single_Cell Dataset
+### DELETE BELOW???
 test_genes<-test_genes[test_genes %in% rownames(CDS)]
 
 test_genes<-test_genes[test_genes %in% rownames(fData(CDS)[fData(CDS)$num_cells_expressed > 5,])]
@@ -1142,6 +1309,7 @@ length(test_genes)
 mean(is.na(exprs(CDS[test_genes,])))
 ```
 
+##DELETE BELOW
 ```{r pseudotime_contrast,eval=FALSE}
 #now do differential expression on dimorphic genes
 diff_test_res<- differentialGeneTest(CDS[test_genes,], 
@@ -1149,9 +1317,9 @@ diff_test_res<- differentialGeneTest(CDS[test_genes,],
 save(diff_test_res,file="diff_test_res.rdata")
 ````
 
-##Create Figure 3C & Supplmental Table 1c
-```{r visualizePseudotime}
-load("diff_test_res.rdata")
+##DELETE ME
+```{r}
+load("inst/extdata/diff_test_res.rdata")
 #merge with fData
 diff_test_res2 <- merge(fData(CDS), diff_test_res, by=0)
 rownames(diff_test_res2)<-diff_test_res2$Row.names
@@ -1163,7 +1331,10 @@ colnames(diff_test_res2_subset)<-c("Bulk Sequencing FPKM","Gene Symbol","WT vs C
 diff_test_res2_subset<-diff_test_res2_subset[,colnames(diff_test_res2_subset)!="Status"]
 write.csv(diff_test_res2_subset,"Supplemental_Table_1c.csv",quote=F)
 
+```
 
+##Create Figure 3C
+```{r visualizePseudotime}
 #used for Ordering
 gene<-"Serpine2"
 a1<-plot_symbol_in_pseudotime(gene)
@@ -1197,6 +1368,73 @@ a6<-plot_symbol_in_pseudotime(gene)
 grid.arrange(a6, ncol=1, main = gene)
 
 grid.arrange(a1,a3,a4,a2,a5,a6,ncol=3,main="Dimorphic Genes in Pseudotime")
+```
+
+# Single Cell Differential Expression
+```{r}
+cd<-counts(scdds)
+colnames(cd)<-sapply(strsplit(colnames(cd),"_"), function(x) x[3])
+#head(cd)
+
+temp<-pData(CDS)
+temp<-temp[with(temp,order(Pseudotime)),]
+early<-rownames(head(temp,n=20))
+late<-rownames(tail(temp,n=20))
+cd_groups<-factor(c(rep("late",length(early)),rep("early",length(late))),levels=c("late","early"))
+names(cd_groups)<-c(late,early)
+table(cd_groups)
+
+#subset cd
+cd<-cd[,c(late,early)]
+
+#clean up
+cd <- cd[rowSums(cd)>0,]
+cd <- cd[,colSums(cd)>1e4]
+
+n.cores<-4
+system.time(o.ifm <- scde.error.models(counts=cd,groups=cd_groups,n.cores=n.cores,threshold.segmentation=T,save.crossfit.plots=F,save.model.plots=F,verbose=1))
+
+valid.cells <- o.ifm$corr.a >0;
+table(valid.cells)
+o.prior <- scde.expression.prior(models=o.ifm,counts=cd,length.out=400,show.plot=F)
+
+#Differential Expression Test
+ediff <- scde.expression.difference(o.ifm,cd,o.prior,groups=cd_groups,n.randomizations=100,n.cores=n.cores,verbose=1)
+
+#add Symbol Annotation
+blah<-AnnotationDbi::select(org.Mm.eg.db,keys=rownames(ediff),keytype="ENSEMBL", column="SYMBOL")
+ediff$symbol<-blah[match(rownames(ediff),blah$ENSEMBL),"SYMBOL"]
+
+#order on Z
+ediff<-ediff[order(ediff$Z,decreasing=T),]
+
+#add Ovary LogFC
+ediff$OvaryLog2FC<-cag_dmrt1F_DF[match(rownames(ediff),rownames(cag_dmrt1F_DF)),"log2FoldChange"]
+#add WT LogFC
+ediff$WTLog2FC<-WT_resDF[match(rownames(ediff),rownames(WT_resDF)),"log2FoldChange"]
+#add "Yes/No" for whether each gene was used in ordering
+ediff$UsedForOrdering<-ifelse(rownames(ediff) %in% ordering_genes,"yes","no")
+#Add "Yes/No" for differentially expressed embyronically
+ediff$EmbryonicallyDimorphic<-ifelse(rownames(ediff) %in% test_genes,"yes","no")
+
+#sanity Check
+temp<-c("Sox9","Foxl2","Dmrt1","Pou5f1","Gapdh","Hsd17b3","Insl3","Cyp19a1")
+ediff[ediff$symbol %in% temp,]
+
+#Cst9
+scde.test.gene.expression.difference("ENSMUSG00000027445",models=o.ifm,counts=cd,prior=o.prior,groups=cd_groups)
+
+#col1a1
+scde.test.gene.expression.difference("ENSMUSG00000001506",models=o.ifm,counts=cd,prior=o.prior,groups=cd_groups)
+```
+
+###Write out Supplemental Table 1c
+```{r SupplementalTable1c}
+ediff_subset<-ediff[abs(ediff$ce) > 1 | ediff$UsedForOrdering == "yes",]
+colnames(ediff_subset)[1:6]<-c("LowerBound FoldChange","Maximum Likelihood FoldChange",
+                               "Upperbound FoldChange","Conservative Estimate FoldChange",
+                               "Uncorrected Z-Score","Z-Score Corrected for Multiple Testing")
+write.csv(ediff_subset,"Supplemental_Table_1c.csv",quote=F)
 ```
 
 # Session Info
