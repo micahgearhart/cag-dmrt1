@@ -1,7 +1,7 @@
 ---
-title: "Bioinformatics Supplement, Lindeman et. al."
+title: "Bioinformatics Workflow Supplement, Lindeman et. al."
 author: "Micah D. Gearhart"
-date: "10/24/2014"
+date: "12/15/2014"
 abstract: This document contains an annotated workflow of the informatics analyses including software settings and options, diagnostic plots of data quality and methods for statistical tests that can be reproduced in the R programming language.  The source code is available at https://github.com/micahgearhart/cag-dmrt1.
 
 output:
@@ -9,7 +9,6 @@ output:
     toc: true
     fig_caption: true
     number_sections: true
-    
   html_document:
     keep_md: yes
 ---
@@ -28,6 +27,7 @@ library(gridExtra)
 library(biovizBase)
 library(ggbio)
 library(rtracklayer)
+library(NMF)
 
 #RNA-Seq Toolkit
 library(biomaRt)
@@ -46,7 +46,11 @@ library(scde)
 library(Biobase)
 library(GEOquery)
 library(limma)
-library(NMF)
+
+#Misc
+library(dplyr)
+library(R.utils)
+library(RColorBrewer)
 
 #options
 options(scipen = 10, digits = 4)
@@ -152,20 +156,6 @@ cag_dmrt1 <- GenomicAlignments::summarizeOverlaps(exonsByGene, bamlst,
 save(cag_dmrt1,file="cag_dmrt1.rdata")
 ```
 
-
-### DELETE ME
-```{r load_bulk_rnaseq_data}
-load("inst//extdata//cag_dmrt1.rdata")
-load("inst//extdata//exonsByGene_mm9_biomart_ensembl.rdata")
-colData(cag_dmrt1)@rownames 
-colData(cag_dmrt1)@rownames <- sapply(strsplit(colData(cag_dmrt1)@rownames,"_"),"[[",1)
-colData(cag_dmrt1)$sex<-as.factor(c("Female","Female","Female","Female","Male","Male"))
-colData(cag_dmrt1)$dmrt1<-as.factor(c("on","on","off","off","on","on"))
-colData(cag_dmrt1)
-levels(colData(cag_dmrt1)$sex)
-levels(colData(cag_dmrt1)$dmrt1)
-```
-
 ### DESeq2
 Use DESeq2 to identify differentially expressed genes between wild type and mutant ovaries.
 ```{r unified_DESeq2}
@@ -256,30 +246,6 @@ cag_dmrt1F_DF_subset<-cag_dmrt1F_DF[which(cag_dmrt1F_DF$padj < 0.05 &
                                             abs(cag_dmrt1F_DF$log2FoldChange) > 1),]
 nrow(subset(cag_dmrt1F_DF_subset,log2FoldChange >1))
 nrow(subset(cag_dmrt1F_DF_subset,log2FoldChange <1))
-```
-
-##DELETE ME
-```{r ovary_contrast}
-#Subset the Summarized Experiment to only include the Female Data
-colData(cag_dmrt1)
-cag_dmrt1F<-cag_dmrt1[,cag_dmrt1$sex %in% "Female" & cag_dmrt1$dmrt1 %in% c("off","on")]
-colData(cag_dmrt1F)
-cag_dmrt1F$sex<-droplevels(cag_dmrt1F$sex)
-levels(colData(cag_dmrt1F)$sex)
-levels(colData(cag_dmrt1F)$dmrt1)
-
-#Run DESeq2
-cag_dmrt1F_dds <- DESeqDataSet(cag_dmrt1F, design = ~1   )
-cag_dmrt1F_dds <- estimateSizeFactors(cag_dmrt1F_dds )
-sizeFactors(cag_dmrt1F_dds)
-colSums(counts(cag_dmrt1F_dds))
-design(cag_dmrt1F_dds) <- ~dmrt1
-cag_dmrt1F_dds <- DESeq( cag_dmrt1F_dds )
-cag_dmrt1F_res <- results( cag_dmrt1F_dds )
-
-#head(cag_dmrt1F_res)
-#plotDispEsts(cag_dmrt1F_dds)
-#DESeq2::plotMA(cag_dmrt1F_dds)
 ```
 
 # Analysis of X Chromosome Enrichment
@@ -414,13 +380,11 @@ log5_enriched<-subset(cag_dmrt1F_DF,abs(log2FoldChange)>5)
 #download mm9 Ideogram
 #mm9IdeogramCyto <- getIdeogram("mm9", cytoband = TRUE)
 #save(mm9IdeogramCyto,file="mm9IdeogramCyto.rdata")
-load("mm9IdeogramCyto.rdata")
+load("inst/extdata/mm9IdeogramCyto.rdata")
 seqlevelsStyle(mm9IdeogramCyto)
 seqlevels(mm9IdeogramCyto)
 seqlengths(mm9IdeogramCyto)
 mm9IdeogramCyto<-keepSeqlevels(mm9IdeogramCyto,paste0("chr",c(1:19,"X")))
-
-
 
 #Create a GRanges object
 log5_genes<-genes[rownames(log5_enriched)]
@@ -433,14 +397,17 @@ p <- p + layout_karyogram(log5_genes, geom = "rect", ylim = c(11, 21), color = "
 p
 ```
 <div class="pagebreak"></div>
+
 ### Alternative to Figure S2B - Boxplots of Log2Fold Changes
 ```{r S2Boxplot}
+#Set up Color Palette
+colors <- brewer.pal(4, "YlOrRd")
+pal <- colorRampPalette(colors)
+
 temp<-cag_dmrt1F_DF
 temp<-temp[temp$CHR %in% paste0("chr",c(1:19,"X")),]
 temp$CHR<-droplevels(temp$CHR)
 #levels(temp$CHR)<-rev(levels(temp$CHR))
-
-#set up colors based on GSEA_strength
 
 q2<-ggplot(temp,aes(x=CHR,y=log2FoldChange,fill=CHR)) + theme_bw()+
   geom_boxplot(aes(fill=CHR))+
@@ -449,6 +416,7 @@ q2<-ggplot(temp,aes(x=CHR,y=log2FoldChange,fill=CHR)) + theme_bw()+
   labs(x=NULL,y="Log2 Fold Change")+
   coord_flip()+scale_x_discrete(limits=c(paste0("chr",c("X",19:1)))) +
   ylim(-8,12) + theme(legend.position="none")
+q2
 
 #q2<-ggplot(temp,aes(x=CHR,y=log2FoldChange,fill=CHR)) + theme_bw()+
 #  geom_boxplot() + scale_fill_brewer(pallete="Pastel2") +
@@ -460,8 +428,8 @@ q2<-ggplot(temp,aes(x=CHR,y=log2FoldChange,fill=CHR)) + theme_bw()+
 
 ### Supplemental Figure S2C - PieChart
 
-```{r S2PieChart,warning=FALSE,fig.height=8}
-#create a color pallete
+```{r S2PieChart,fig.height=8,fig.width=6}
+#Set up Color Palette
 colors <- brewer.pal(4, "YlOrRd")
 pal <- colorRampPalette(colors)
 
@@ -477,34 +445,41 @@ temp$Chromosome<-droplevels(temp$Chromosome)
 #levels(temp$Chromosome)<-rev(levels(temp$Chromosome))
 #temp$Number_of_Enriched_Genes<-rev(temp$Number_of_Enriched_Genes)
 
-pie <- ggplot(temp,aes(x="", y=Number_of_Enriched_Genes, fill = Chromosome )) +
-       geom_bar(aes(fill=Chromosome),width = 1,stat="identity",colour="black") + 
-       coord_polar(theta="y") +
-       geom_text(aes(x=1.7,y = 250, label = "chrX")) +  theme_bw() +
-       scale_fill_manual(values=pal(20))
-```
+#temp$Chromosome<-as.character(temp$Chromosome)
 
+#pie<-ggplot(temp,aes(x=factor(1), y=Number_of_Enriched_Genes) ) +
+#       geom_bar(aes(fill=Chromosome),width = 1,stat="identity",colour="black") +
+#       coord_polar(theta=c("y")) + theme_bw()+
+#       geom_text(aes(x=1.7,y = 250, label = "chrX")) +
+#       scale_fill_manual(values=pal(20))
+#pie
+#save(pie,file="inst/extdata/pie.rdata")
 ### Supplemental Figure S2D - Gene Set Enrichment Score Plot
-```{r S2plotGSEA,warning=FALSE}
+#```{r S2plotGSEA}
 #Plot AvgLFC across chromosomes
 #temp<-data.frame(score=chrdata$GSEA_strength,chromosome=rownames(chrdata))
 #levels(temp$chromosome)<-rev(rownames(chrdata))
 #temp<-melt(temp,value.name="score")
 #plot gsea_avgLFC
-q1<-data.frame(score=chrdata$GSEA_strength,
-               chromosome=factor(rownames(chrdata),levels=paste0("chr",c(1:19,"X")))
-               ) %>%
-   ggplot(aes(x=chromosome,y=score)) +
-   geom_bar(aes(fill=chromosome),stat = "identity",color="black") + theme_bw() +
-   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
-   coord_flip() + scale_x_discrete(limits=c(paste0("chr",c("X",19:1))))+
-   labs(y="Enrichment Score",x="Chromosome") +scale_fill_manual(values=pal(20)) +
-   theme(legend.position="none")
-```
-<div class="pagebreak"></div>
+
+#q1<-data.frame(score=chrdata$GSEA_strength,
+#               chromosome=factor(rownames(chrdata),levels=paste0("chr",c(1:19,"X")))
+#               ) %>%
+#   ggplot(aes(x=chromosome,y=score)) +
+#   geom_bar(aes(fill=chromosome),stat = "identity",color="black") + theme_bw() +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+#   coord_flip() + scale_x_discrete(limits=c(paste0("chr",c("X",19:1))))+
+#   labs(y="Enrichment Score",x="Chromosome") +scale_fill_manual(values=pal(20)) +
+#   theme(legend.position="none")
+#q1
+#save(q1,file="inst/extdata/q1.rdata")
+#```
+#<div class="pagebreak"></div>
 
 ### Supplemental Figure S2  
-``{r}
+#``{r,eval=F}
+load("inst/extdata/pie.rdata")
+load("inst/extdata/q1.rdata")
 grid.arrange(q2,q1,pie,ncol=3,main="A Subset of Genes on Chromosome X are Highly Upregulated")
 ```
 
@@ -541,41 +516,6 @@ aheatmap(log2(rd+0.25),Rowv=NA,Colv=NA,color="PRGn",scale="row", annCol=labels)
 # WT Ovary vs Testis RNA-Seq
 
 ## Use wt RNA-SEQ to Identify Male and Female Specific Genes
-
-###DELETE ME
-Count reads for the wild type samples.
-```{r Count_WT, eval=FALSE}
-load("../dmrt6/exonsByGene_mm9_biomart_ensembl.rdata")
-(fls <- list.files("mm9", pattern=glob2rx("WTm*.bam"),full=TRUE))
-(fls2 <- list.files("mm9", pattern=glob2rx("WTf*.bam"),full=TRUE))
-fls<-c(fls,fls2)
-bamlst <- BamFileList(fls,yieldSize=1000000)
-BiocParallel::register(MulticoreParam(workers=4))
-WT<- summarizeOverlaps(exonsByGene, bamlst, mode="Union",singleEnd=FALSE, ignore.strand=TRUE)
-save(WT,file="wt_testis_ovary_data.rdata")
-```
-
-### DELETE ME
-Determine logFC between male and female gonads to identify sex specific transcripts.
-``` {r WT_DESeq2}
-load("wt_testis_ovary_data.rdata")
-colData(WT)
-colData(WT)@rownames
-colData(WT)@rownames<-c("WTm1","WTm2","WTf6","WTf7")
-colData(WT)$sex<-as.factor(c(rep("Male",2),rep("Female",2)))
-WT_dds <- DESeqDataSet(WT, design = ~1   )
-WT_dds <- estimateSizeFactors(WT_dds )
-sizeFactors(WT_dds)
-colSums(counts(WT_dds))
-design(WT_dds) <- ~sex
-WT_dds <- DESeq( WT_dds )
-WT_res <- results( WT_dds )
-resultsNames(WT_dds)
-head(WT_res)
-#plotDispEsts(WT_dds)
-#DESeq2::plotMA(WT_res)
-```
-
 
 ```{r wildType_contrast}
 WT_res<-results(cag_dmrt1_dds, contrast=c("group","wt_male","wt_female"))
@@ -691,7 +631,7 @@ save(tT_foxl2_KO,file="foxl2_ko_DEGs.rdata")
 
 ## Compare DMRT1 Overexpression to FOXL2 Knockout
 ```{r combineDMRT1_FOXL2}
-load("foxl2_ko_DEGs.rdata")
+load("inst/extdata/foxl2_ko_DEGs.rdata")
 #Use NCBI GeneIDs to match Microarray Data to RNA-Seq
 idx<-match(tT_foxl2_KO$Gene.ID,cag_dmrt1F_DF$ENTREZID)
 tT_foxl2_KO$cag_dmrt1F_logFC<-cag_dmrt1F_DF[idx,"log2FoldChange"]
@@ -704,6 +644,8 @@ mean(is.na(tT_foxl2_KO$cag_dmrt1F_logFC))
 
 #Filter out NAs
 tT3<-tT_foxl2_KO[!is.na(tT_foxl2_KO$cag_dmrt1F_logFC),]
+tT3$Gene.symbol<-as.character(tT3$Gene.symbol)
+tT3$Gene.ID<-as.character(tT3$Gene.ID)
 nrow(tT3)
 
 
@@ -733,26 +675,24 @@ Plot the DMRT1 overexpression data vs the FOXL2 knockout data with color coding 
 
 ```{r Scatterplot}
 scattertT3 <- function (genes) {
-p<-ggplot(tT3,aes(x=tT3$logFC,y=tT3$cag_dmrt1F_logFC,color=enrich,shape=chrX))
-p<- p +  geom_point(size=ifelse(tT3$chrX,4,2)) +
+p<-ggplot(tT3,aes(x=tT3$logFC,y=tT3$cag_dmrt1F_logFC,color=enrich))
+p<- p +  geom_point(size=ifelse(tT3$chrX,4,2),shape=ifelse(tT3$chrX,17,16)) +
   scale_colour_manual(values=c("red", "blue","gray")) +
   annotate("rect",xmin=-1, xmax=1, ymin=4, ymax=Inf, fill="blue",alpha=0.25) +
   annotate("rect",xmin=-1, xmax=1, ymin=-4, ymax=-Inf, fill="pink",alpha=0.25) +
   #horizontal boxes
   #annotate("rect",xmin=1, xmax=Inf, ymin=-1, ymax=1, fill="gray",alpha=0.25) +
   #annotate("rect",xmin=-Inf, xmax=-1, ymin=-1, ymax=1, fill="gray",alpha=0.25) +
-  ylim(-10,10) + xlim(-6,6) +
+  ylim(-11,11) + xlim(-6,6) +
   xlab("FOXL2 KO logFC") + ylab("DMRT1 OE logFC") +
   ggtitle("FOXL2 vs DMRT1 in the Ovary") +
   guides(color=FALSE,shape=FALSE) +
   theme_bw() 
 
-for (gene in genes) {
-   gene <- paste0("^", gene, "$")
-line <- grep(gene,tT3$Gene.symbol)
-p <- p+annotate("text",x=tT3$logFC[line], y=tT3$cag_dmrt1F_logFC[line],label=tT3$Gene.symbol[line])
-}
-p
+labels<-tT3[tT3$Gene.symbol %in% genes,]
+
+p+annotate("text",x=labels$logFC, y=labels$cag_dmrt1F_logFC,label=labels$Gene.symbol)
+
 
 }
 
@@ -1288,82 +1228,55 @@ p <- ggplot(temp, aes(x = time, y = value, fill = sex)) + facet_grid(. ~ probe)
 plotEmbryonicData("Sox9")
 ```
 
-## Test early dimorphic genes for variation in pseudotime
-This section performs a statistical test on the genes of interest.
-
-```{r identifyTestGenes,warning=FALSE}
-# Differentially expressed at E11.6,E11.8 or E12.0 in Black6 mice
-test_genes<-tT$Gene.ID
-#Gene Ensemble IDs
-test_genes <- AnnotationDbi::select(org.Mm.eg.db, keys=test_genes, columns="ENSEMBL",keytype="ENTREZID")$ENSEMBL
-#remove duplicates from multiple probes
-test_genes<-test_genes[!duplicated(test_genes)]
-#make sure gene is in Single_Cell Dataset
-### DELETE BELOW???
-test_genes<-test_genes[test_genes %in% rownames(CDS)]
-
-test_genes<-test_genes[test_genes %in% rownames(fData(CDS)[fData(CDS)$num_cells_expressed > 5,])]
-test_genes<-test_genes[!test_genes %in% ordering_genes]
-length(test_genes)
-#check to make sure data is all there
-mean(is.na(exprs(CDS[test_genes,])))
-```
-
-##DELETE BELOW
-```{r pseudotime_contrast,eval=FALSE}
-#now do differential expression on dimorphic genes
-diff_test_res<- differentialGeneTest(CDS[test_genes,], 
-                                     fullModelFormulaStr="expression~sm.ns(Pseudotime)")
-save(diff_test_res,file="diff_test_res.rdata")
-````
-
-##DELETE ME
-```{r}
-load("inst/extdata/diff_test_res.rdata")
-#merge with fData
-diff_test_res2 <- merge(fData(CDS), diff_test_res, by=0)
-rownames(diff_test_res2)<-diff_test_res2$Row.names
-diff_test_res2<-diff_test_res2[,-1]
-diff_test_res2_subset<-subset(diff_test_res2,pval<0.05  & num_cells_expressed>10)
-colnames(diff_test_res2_subset)<-c("Bulk Sequencing FPKM","Gene Symbol","WT vs CAG Ovary log2FC",
-                                   "Testis vs Ovary log2FC","# cells > 0.1 FPKM",
-                                   "Used To Order Pseudotime","Status","Pval","Qval")
-diff_test_res2_subset<-diff_test_res2_subset[,colnames(diff_test_res2_subset)!="Status"]
-write.csv(diff_test_res2_subset,"Supplemental_Table_1c.csv",quote=F)
-
-```
-
 ##Create Figure 3C
 ```{r visualizePseudotime}
+
+temp<-c("Serpine2","Cst9","Aard","Rhox8","Col1a1","Mmp2")
+
+for (gene in temp) {
+    a[[gene]]<-plot_symbol_in_pseudotime(gene)+ theme(legend.position="none")
+if  (paste("^",gene,"$") in tT$Gene.symbol) {
+    b[[gene]]<-plotEmbryonicData(gene)
+    grid.arrange(b[[gene]],a[[gene]], ncol=1, main = gene)
+} else {
+    grid.arrange(a[[gene]], ncol=1, main = gene)
+}
+}
+
+for (gene in temp) {
+    a[[gene]]<-plot_symbol_in_pseudotime(gene)+ theme(legend.position="none")
+    }
+
+grid.arrange(a[[1]],a[[2]],a[[3]],a[[4]],a[[5]],a[[6]],ncol=3,main="Dimorphic Genes in Pseudotime")
+
+
 #used for Ordering
 gene<-"Serpine2"
-a1<-plot_symbol_in_pseudotime(gene)
 b1<-plotEmbryonicData(gene)
-grid.arrange(b1,a1, ncol=1, main = gene)
 
 gene<-"Cst9"
-a2<-plot_symbol_in_pseudotime(gene)
+a2<-plot_symbol_in_pseudotime(gene)+ theme(legend.position="none")
 b2<-plotEmbryonicData(gene)
 grid.arrange(b2,a2, ncol=1, main = gene)
 
 #Ordered by pseudotime (~high correlation to ordering genes)
 gene<-"Gstm2"
-a3<-plot_symbol_in_pseudotime(gene)
+a3<-plot_symbol_in_pseudotime(gene)+ theme(legend.position="none")
 b3<-plotEmbryonicData(gene)
 grid.arrange(b3,a3, ncol=1, main = gene)
 
 gene<-"Mmp2"
-a4<-plot_symbol_in_pseudotime(gene)
+a4<-plot_symbol_in_pseudotime(gene)+ theme(legend.position="none")
 b4<-plotEmbryonicData(gene)
 grid.arrange(b4,a4, ncol=1, main = gene)
 
 gene<-"Sdc4"
-a5<-plot_symbol_in_pseudotime(gene)
+a5<-plot_symbol_in_pseudotime(gene)+ theme(legend.position="none")
 b5<-plotEmbryonicData(gene)
 grid.arrange(b5,a5, ncol=1, main = gene)
 
 gene<-"Col1a1" #not expressed in microarray
-a6<-plot_symbol_in_pseudotime(gene)
+a6<-plot_symbol_in_pseudotime(gene)+ theme(legend.position="none")
 #b6<-plotEmbryonicData(gene)
 grid.arrange(a6, ncol=1, main = gene)
 
@@ -1371,7 +1284,7 @@ grid.arrange(a1,a3,a4,a2,a5,a6,ncol=3,main="Dimorphic Genes in Pseudotime")
 ```
 
 # Single Cell Differential Expression
-```{r}
+```{r SCDE}
 cd<-counts(scdds)
 colnames(cd)<-sapply(strsplit(colnames(cd),"_"), function(x) x[3])
 #head(cd)
@@ -1395,7 +1308,7 @@ n.cores<-4
 system.time(o.ifm <- scde.error.models(counts=cd,groups=cd_groups,n.cores=n.cores,threshold.segmentation=T,save.crossfit.plots=F,save.model.plots=F,verbose=1))
 
 valid.cells <- o.ifm$corr.a >0;
-table(valid.cells)
+#table(valid.cells) #all valid
 o.prior <- scde.expression.prior(models=o.ifm,counts=cd,length.out=400,show.plot=F)
 
 #Differential Expression Test
@@ -1414,12 +1327,20 @@ ediff$OvaryLog2FC<-cag_dmrt1F_DF[match(rownames(ediff),rownames(cag_dmrt1F_DF)),
 ediff$WTLog2FC<-WT_resDF[match(rownames(ediff),rownames(WT_resDF)),"log2FoldChange"]
 #add "Yes/No" for whether each gene was used in ordering
 ediff$UsedForOrdering<-ifelse(rownames(ediff) %in% ordering_genes,"yes","no")
+
+
 #Add "Yes/No" for differentially expressed embyronically
-ediff$EmbryonicallyDimorphic<-ifelse(rownames(ediff) %in% test_genes,"yes","no")
+# Differentially expressed at E11.6,E11.8 or E12.0 in Black6 mice
+suppressWarnings(early_dimorphic_genes <- 
+  AnnotationDbi::select(org.Mm.eg.db, keys=tT$Gene.ID, columns="ENSEMBL",keytype="ENTREZID")$ENSEMBL)
+ediff$EmbryonicallyDimorphic<-ifelse(rownames(ediff) %in% early_dimorphic_genes,"yes","no")
 
 #sanity Check
-temp<-c("Sox9","Foxl2","Dmrt1","Pou5f1","Gapdh","Hsd17b3","Insl3","Cyp19a1")
+temp<-c("Serpine2","Mmp2","Cst9","Col1a1","Aard","Rhox8")
 ediff[ediff$symbol %in% temp,]
+
+eDM<-ediff[abs(ediff$ce) > 1 & ediff$EmbryonicallyDimorphic=="yes",]
+write.csv(eDM,file="embryonically_dimorphic39.csv",quote=F)
 
 #Cst9
 scde.test.gene.expression.difference("ENSMUSG00000027445",models=o.ifm,counts=cd,prior=o.prior,groups=cd_groups)
@@ -1435,6 +1356,68 @@ colnames(ediff_subset)[1:6]<-c("LowerBound FoldChange","Maximum Likelihood FoldC
                                "Upperbound FoldChange","Conservative Estimate FoldChange",
                                "Uncorrected Z-Score","Z-Score Corrected for Multiple Testing")
 write.csv(ediff_subset,"Supplemental_Table_1c.csv",quote=F)
+```
+
+
+```{r IdentifyMiddleGenes, eval=F}
+cd<-counts(scdds)
+colnames(cd)<-sapply(strsplit(colnames(cd),"_"), function(x) x[3])
+
+temp<-pData(CDS)
+temp<-temp[with(temp,order(Pseudotime)),]
+q1<-quantile(temp$Pseudotime,1/3,type=1)
+q2<-quantile(temp$Pseudotime,2/3,type=1)
+
+
+middle<-rownames(temp[temp$Pseudotime > q1 & temp$Pseudotime < q2,])
+ends<-rownames(temp[temp$Pseudotime < q1 | temp$Pseudotime > q2,])
+cd_groups<-factor(c(rep("middle",length(middle)),rep("ends",length(ends))),levels=c("middle","ends"))
+names(cd_groups)<-c(middle,ends)
+table(cd_groups)
+
+#subset cd
+cd<-cd[,c(middle,ends)]
+
+#clean up
+cd <- cd[rowSums(cd)>0,]
+cd <- cd[,colSums(cd)>1e4]
+
+n.cores<-4
+system.time(o.ifm <- scde.error.models(counts=cd,groups=cd_groups,n.cores=n.cores,threshold.segmentation=T,save.crossfit.plots=F,save.model.plots=F,verbose=1))
+
+valid.cells <- o.ifm$corr.a >0;
+#table(valid.cells) #all valid
+o.prior <- scde.expression.prior(models=o.ifm,counts=cd,length.out=400,show.plot=F)
+
+#Differential Expression Test
+ediff <- scde.expression.difference(o.ifm,cd,o.prior,groups=cd_groups,n.randomizations=100,n.cores=n.cores,verbose=1)
+
+#add Symbol Annotation
+blah<-AnnotationDbi::select(org.Mm.eg.db,keys=rownames(ediff),keytype="ENSEMBL", column="SYMBOL")
+ediff$symbol<-blah[match(rownames(ediff),blah$ENSEMBL),"SYMBOL"]
+
+#add Ovary LogFC
+ediff$OvaryLog2FC<-cag_dmrt1F_DF[match(rownames(ediff),rownames(cag_dmrt1F_DF)),"log2FoldChange"]
+#add WT LogFC
+ediff$WTLog2FC<-WT_resDF[match(rownames(ediff),rownames(WT_resDF)),"log2FoldChange"]
+#add "Yes/No" for whether each gene was used in ordering
+ediff$UsedForOrdering<-ifelse(rownames(ediff) %in% ordering_genes,"yes","no")
+#Add "Yes/No" for differentially expressed embyronically
+ediff$EmbryonicallyDimorphic<-ifelse(rownames(ediff) %in% early_dimorphic_genes,"yes","no")
+
+
+#order on Z
+ediff<-ediff[order(ediff$Z,decreasing=T),]
+
+ediff_subset<-ediff[abs(ediff$cZ) > 1 & abs(ediff$OvaryLog2FC) < 100 & ediff$EmbryonicallyDimorphic =="yes",]
+ediff_subset<-ediff[abs(ediff$cZ) > 0.5,]
+
+#
+scde.test.gene.expression.difference("ENSMUSG00000027445",models=o.ifm,counts=cd,prior=o.prior,groups=cd_groups)
+
+
+
+
 ```
 
 # Session Info
